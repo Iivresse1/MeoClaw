@@ -58,7 +58,9 @@ def build_workflow() -> "CompiledStateGraph":
       它判断上下文是否过大 → 需要就先 `context_compressor` 压缩，再回到 planner。
       这样成功路径（→ final）完全不受影响，也避免压缩节点被反复触发。
     """
-    graph = StateGraph(MeoGraphState)
+    graph = StateGraph(MeoGraphState)  #StateGraph 是主要的图类，以用户定义的 State 对象作为类型参数。
+
+    #----构建图时，先定义状态，再添加节点和边，最后编译----#
 
     graph.add_node("planner", planner_node)
     graph.add_node("actor", actor_node)
