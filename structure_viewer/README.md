@@ -2,6 +2,11 @@
 
 自包含交互式架构图（archify 生成，双击或浏览器打开即可，无需构建/依赖）。
 
+以下是示例图:
+![MeoClaw 模块级架构总览](assets/meoclaw.png)
+
+`![graph/nodes.py 函数级全量图](assets/graph-nodes-py.png)`
+
 
 ## 阅读路径
 
