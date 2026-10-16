@@ -1,0 +1,53 @@
+# 密钥 / 敏感文件
+.env
+.env.*
+!.env.example
+!.env.template
+!.env.sample
+.env.local
+.env.*.local
+*.env.bak
+*.key
+*.pem
+*.p12
+*.pfx
+id_rsa
+id_ed25519
+*_rsa
+credentials.json
+secrets.json
+secrets/
+.aws/
+.azure/
+.gcloud/
+.netrc
+
+# Python
+__pycache__/
+*.py[cod]
+*$py.class
+*.so
+build/
+dist/
+*.egg-info/
+.eggs/
+.venv/
+venv/
+env/
+.Python
+
+# 测试 / 缓存
+.pytest_cache/
+.mypy_cache/
+.ruff_cache/
+.coverage
+htmlcov/
+
+# 运行时工作区（工具产物默认落在这里）
+/workspace/
+
+# 编辑器 / 系统
+.idea/
+.vscode/
+.DS_Store
+Thumbs.db
