@@ -1,8 +1,6 @@
 # MeoClaw
 
-工作区受限的编码智能体：`typer` 提供 CLI，`langchain-core` 提供工具协议，`langchain-openai` 提供模型，
-`rich` 负责实时输出，`langgraph` 承载共享状态。
-所有文件类工具都被钉在 `RuntimeState.workspace` 里 —— 路径越界直接拒绝。
+一个Code Agent,可以通过CLI框架执行你想要的指令；
 
 ## 快速开始
 
