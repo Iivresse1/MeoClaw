@@ -1,7 +1,6 @@
 # MeoClaw
 
-一个本地桌面 AI 助理：Electron + React 前端、Python 桥接服务、MeoClaw Agent 后端核心三位一体。
-支持纯对话、工作区文件任务和系统工具（截图/剪贴板/打开链接）三类权限模式，高危操作需用户批准。
+MeoClaw是一个本地桌面的 AI 助理：支持纯对话、工作区文件任务和系统工具（截图/剪贴板/打开链接）三类模式。
 
 > 仓库分支说明：**`main`** 为桌面端工程（`desktop/` 前端 + `bridge/` 桥接层）；
 > **`branch`** 为后端核心 `meoclaw`（planner→actor→verifier 工作流、工具集、CLI、测试）。
