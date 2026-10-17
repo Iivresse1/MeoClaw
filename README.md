@@ -153,10 +153,9 @@ npm run build; npm start    # 生产模式（加载 dist）
 ---
 
 > 仓库分支说明：**`main`** 为完整项目（后端核心 `src/` + 桥接层 `bridge/` + 桌面端 `desktop/`）；
-> **`branch`** 为后端核心 `meoclaw` 的备份分支（内容冻结于 main 重构之前）。
+> **`branch`** 为后端核心 `meoclaw` 的备份分支。
 
-本项目的前端部分参考dsh和openclaw进行了重新设计，AI辅助实现。
-
+>本项目的前端部分参考dsh和openclaw进行了重新设计，AI辅助实现。
 > 后端核心的完整架构、模块职责、关键类与函数、事件系统、安全模型与扩展指南见
 > [项目架构指南.md](项目架构指南.md)；
 > 交互式分层架构图（模块级 → 函数级 → 代码行级下钻）见 [structure_viewer/](structure_viewer/README.md)。
