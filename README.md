@@ -2,9 +2,6 @@
 
 MeoClaw是一个本地桌面的 AI 助理：支持纯对话、工作区文件任务和系统工具（截图/剪贴板/打开链接）三类模式。
 
-> 仓库分支说明：**`main`** 为桌面端工程（`desktop/` 前端 + `bridge/` 桥接层）；
-> **`branch`** 为后端核心 `meoclaw`（planner→actor→verifier 工作流、工具集、CLI、测试）。
-
 ![MeoClaw 架构总览](structure_viewer/assets/meoclaw.png)
 
 ## 项目整体架构
@@ -152,6 +149,9 @@ npm run build; npm start    # 生产模式（加载 dist）
   `system` 档触发审批卡验证允许/拒绝链路
 
 ---
+
+> 仓库分支说明：**`main`** 为桌面端工程（`desktop/` 前端 + `bridge/` 桥接层）；
+> **`branch`** 为后端核心 `meoclaw`（planner→actor→verifier 工作流、工具集、CLI、测试）。
 
 > 后端核心的完整架构、模块职责、关键类与函数、事件系统、安全模型与扩展指南见
 > [项目架构指南.md](https://github.com/Iivresse1/MeoClaw/blob/branch/项目架构指南.md)；
