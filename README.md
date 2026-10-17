@@ -11,7 +11,7 @@ MeoClaw是一个本地桌面的 AI 助理：支持纯对话、工作区文件任
 | 桌面壳 | `desktop/electron/` | Electron 33 | 拉起/复用桥接进程、创建窗口、无系统菜单 |
 | 渲染层 | `desktop/src/` | React 18 + TypeScript + Vite | 会话侧边栏、消息流、执行过程卡、审批卡、输入卡片、设置弹窗 |
 | 桥接层 | `bridge/meoclaw_bridge/` | FastAPI + uvicorn + websockets | 仅监听 `127.0.0.1:8931`，REST + WS 封装后端事件流，会话持久化与密钥管理 |
-| 后端核心 | `branch` 分支 `src/meoclaw/` | langgraph + langchain | `stream_agent_events` / `stream_react_events` 事件流、工作区路径安检 |
+| 后端核心 | `src/meoclaw/` | langgraph + langchain | `stream_agent_events` / `stream_react_events` 事件流、工作区路径安检 |
 
 本项目的前端部分参考dsh和openclaw进行了重新设计。
 
@@ -41,6 +41,10 @@ MeoClaw是一个本地桌面的 AI 助理：支持纯对话、工作区文件任
 │  ├─ electron/preload.cjs    # 仅暴露 bridgePort
 │  └─ src/                    # App.tsx + api.ts + components/ + styles.css
 ├─ structure_viewer/          # 后端核心交互式架构图（见其 README.md）
+├─ src/meoclaw/               # 后端核心（agents / cli / core / graph / prompts / providers / tools）
+├─ tests/                     # 后端全链路测试（假模型，无需 API Key）
+├─ pyproject.toml             # 后端打包与依赖声明
+├─ 项目架构指南.md            # 后端完整 Code Wiki
 └─ requirements.txt           # 桥接层 Python 依赖
 ```
 
@@ -83,12 +87,12 @@ MeoClaw是一个本地桌面的 AI 助理：支持纯对话、工作区文件任
 | langchain-openai / core | ≥ 0.2 / ≥ 0.3 | 模型接入与工具协议 | OpenAI 兼容网关换供应商零改动 |
 | keyring | ≥ 25 | API Key 存 Windows 凭据管理器 | 失败自动降级本地 `.secrets.json` |
 | pyperclip / Pillow | — | 剪贴板与截图系统工具 | 桌面场景刚需 |
-| meoclaw（branch 分支） | — | 后端工作流编排 | 复用 langgraph 状态图与统一事件流 |
+| meoclaw（`src/`） | — | 后端工作流编排 | 复用 langgraph 状态图与统一事件流 |
 
 ## 依赖关系
 
 ```
-desktop(渲染层) ──HTTP/WS──▶ bridge(8931) ──pip -e──▶ meoclaw 核心(branch)
+desktop(渲染层) ──HTTP/WS──▶ bridge(8931) ──pip -e──▶ meoclaw 核心(src/)
                                 │                        │
                                 ▼                        ▼
                     %APPDATA%\MeoClawDesktop        OpenAI 兼容 API
@@ -102,15 +106,15 @@ desktop(渲染层) ──HTTP/WS──▶ bridge(8931) ──pip -e──▶ meo
 ## 快速开始
 
 ```powershell
-# 1) 后端核心（branch 分支）+ Python 依赖（建议独立 venv，如 pyruntime）
-git clone -b branch https://github.com/Iivresse1/MeoClaw.git meoclaw-core
-cd meoclaw-core
+# 1) 后端核心 + Python 依赖（建议独立 venv，如 pyruntime）
+git clone https://github.com/Iivresse1/MeoClaw.git meoclaw
+cd meoclaw
 python -m venv ..\pyruntime
 ..\pyruntime\Scripts\python.exe -m pip install -e ".[dev]"
-..\pyruntime\Scripts\python.exe -m pip install -r ..\MeoClaw-Desktop\requirements.txt
+..\pyruntime\Scripts\python.exe -m pip install -r requirements.txt
 
 # 2) 前端依赖
-cd ..\MeoClaw-Desktop\desktop
+cd desktop
 npm install
 
 # 3) 运行（Electron 自动拉起或复用桥接服务，端口 MEOCLAW_BRIDGE_PORT，默认 8931）
@@ -146,14 +150,14 @@ npm run build; npm start    # 生产模式（加载 dist）
 
 ## 测试
 
-- 后端核心全链路回归（假模型、无需 API Key）在 `branch` 分支运行：`python -m pytest`
+- 后端核心全链路回归（假模型、无需 API Key）：仓库根目录运行 `python -m pytest`
 - 桌面端冒烟：`GET /api/health` 探活 → 发送一条「仅对话」消息验证事件流与消息落库 →
   `system` 档触发审批卡验证允许/拒绝链路
 
 ---
 
-> 仓库分支说明：**`main`** 为桌面端工程（`desktop/` 前端 + `bridge/` 桥接层）；
-> **`branch`** 为后端核心 `meoclaw`（planner→actor→verifier 工作流、工具集、CLI、测试）。
+> 仓库分支说明：**`main`** 为完整项目（后端核心 `src/` + 桥接层 `bridge/` + 桌面端 `desktop/`）；
+> **`branch`** 为后端核心 `meoclaw` 的备份分支（内容冻结于 main 重构之前）。
 
 > 后端核心的完整架构、模块职责、关键类与函数、事件系统、安全模型与扩展指南见
 > [项目架构指南.md](项目架构指南.md)；
