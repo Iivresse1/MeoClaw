@@ -2,8 +2,6 @@
 
 MeoClaw是一个本地桌面的 AI 助理：支持纯对话、工作区文件任务和系统工具（截图/剪贴板/打开链接）三类模式。
 
-![MeoClaw 架构总览](structure_viewer/assets/meoclaw.png)
-
 ## 项目整体架构
 
 | 层 | 位置 | 技术 | 职责 |
