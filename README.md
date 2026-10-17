@@ -11,7 +11,7 @@ MeoClaw是一个本地桌面的 AI 助理：支持纯对话、工作区文件任
 | 桥接层 | `bridge/meoclaw_bridge/` | FastAPI + uvicorn + websockets | 仅监听 `127.0.0.1:8931`，REST + WS 封装后端事件流，会话持久化与密钥管理 |
 | 后端核心 | `src/meoclaw/` | langgraph + langchain | `stream_agent_events` / `stream_react_events` 事件流、工作区路径安检 |
 
-本项目的前端部分参考dsh和openclaw进行了重新设计。
+本项目的前端部分参考dsh和openclaw进行了重新设计与vibe coding实现。
 
 一次任务的数据流：
 
