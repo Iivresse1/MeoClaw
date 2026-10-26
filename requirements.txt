@@ -1,4 +1,4 @@
-# MeoClaw 桌面端完整 Python 依赖（包含后端核心）
+# MeoClaw desktop Python dependencies (includes the backend core)
 -e .[dev]
 
 fastapi>=0.115

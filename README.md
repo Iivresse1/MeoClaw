@@ -109,7 +109,7 @@ desktop(渲染层) ──HTTP/WS──▶ bridge(8931) ──pip -e──▶ meo
 - Docker Desktop（WSL2 后端）
 - 一个 OpenAI 兼容模型供应商
 
-以下命令假设在仓库根目录执行，Python 环境目录为 `pyruntime`。
+以下命令需在同一个 PowerShell 会话中依次执行。每一步成功后再进入下一步；如果某一步失败，不要继续执行后面的启动命令。Python 环境目录固定为仓库根目录下的 `pyruntime`。
 
 ```powershell
 # 1. 获取代码
@@ -118,14 +118,28 @@ cd meoclaw
 
 # 2. 创建 Python 环境并安装后端、桥接层依赖
 python -m venv pyruntime
-pyruntime\Scripts\python.exe -m pip install -r requirements.txt
+pyruntime\Scripts\python.exe -m pip install --upgrade pip
+pyruntime\Scripts\python.exe -m pip install -r requirements.txt `
+  -i https://pypi.tuna.tsinghua.edu.cn/simple
 
 # 3. 启动 Docker Desktop，然后构建隔离 shell 镜像
-.\scripts\build-sandbox.ps1
+.\scripts\build-sandbox.ps1 `
+  -PythonImage docker.m.daocloud.io/library/python:3.12-slim `
+  -DebianMirror mirrors.tuna.tsinghua.edu.cn `
+  -PipIndexUrl https://pypi.tuna.tsinghua.edu.cn/simple
 
 # 4. 安装桌面端依赖
 cd desktop
+$env:ELECTRON_MIRROR = "https://npmmirror.com/mirrors/electron/"
 npm install
+```
+
+检查 Python 依赖和沙箱镜像都已安装成功：
+
+```powershell
+cd ..
+pyruntime\Scripts\python.exe -c "import fastapi, langchain, langgraph; print('python deps ok')"
+docker image inspect meoclaw-sandbox:latest --format "{{.Id}}"
 ```
 
 开发模式启动 Vite、Electron 和本地 Bridge：
@@ -145,13 +159,11 @@ npm start
 
 启动后打开应用「设置」，填写供应商名称、模型名、Base URL 和 API Key。Agent 的文本、计划、工具调用、验证命令和审批请求会通过 WebSocket 实时更新。
 
-Docker Hub 或 Debian/PyPI 下载较慢时，可以传入镜像参数：
+如果可正常访问 Docker Hub、Debian 和 PyPI 官方源，也可以改用默认构建：
 
 ```powershell
-.\scripts\build-sandbox.ps1 `
-  -PythonImage docker.m.daocloud.io/library/python:3.12-slim `
-  -DebianMirror mirrors.tuna.tsinghua.edu.cn `
-  -PipIndexUrl https://pypi.tuna.tsinghua.edu.cn/simple
+Set-Location (git rev-parse --show-toplevel)
+.\scripts\build-sandbox.ps1
 ```
 
 桥接健康检查：
@@ -159,6 +171,59 @@ Docker Hub 或 Debian/PyPI 下载较慢时，可以传入镜像参数：
 ```powershell
 Invoke-RestMethod http://127.0.0.1:8931/api/health
 ```
+
+### Windows 首次安装排查
+
+**pip 报 `UnicodeDecodeError` 或 `'gbk' codec can't decode`**
+
+旧版本 `requirements.txt` 包含中文注释，部分中文 Windows 环境会让 pip 使用 CP936/GBK 解码。当前仓库中的依赖文件已改为纯 ASCII。请先更新代码后重新安装；如果使用旧克隆，也可以绕过该文件：
+
+```powershell
+Set-Location (git rev-parse --show-toplevel)
+pyruntime\Scripts\python.exe -m pip install `
+  -i https://pypi.tuna.tsinghua.edu.cn/simple `
+  -e ".[dev]" `
+  "fastapi>=0.115" `
+  "uvicorn>=0.30" `
+  "websockets>=12.0" `
+  "keyring>=25.0" `
+  "pyperclip>=1.8" `
+  "pillow>=10.0"
+```
+
+**Docker 报 `failed to resolve source metadata for python:3.12-slim`**
+
+先确认 Docker Desktop 已启动：
+
+```powershell
+docker version
+```
+
+该错误通常是无法连接 `registry-1.docker.io`，不是项目代码错误。使用上面的国内镜像构建命令；如果 `docker.m.daocloud.io` 不可用，可以尝试：
+
+```powershell
+Set-Location (git rev-parse --show-toplevel)
+.\scripts\build-sandbox.ps1 `
+  -PythonImage docker.1ms.run/library/python:3.12-slim `
+  -DebianMirror mirrors.tuna.tsinghua.edu.cn `
+  -PipIndexUrl https://pypi.tuna.tsinghua.edu.cn/simple
+```
+
+**npm 报 `unable to verify the first certificate`**
+
+失败发生在 Electron 二进制下载阶段，通常是网络代理或本地证书链拦截了 GitHub 下载地址。设置 Electron 镜像后重新执行 `npm install`：
+
+```powershell
+Set-Location (Join-Path (git rev-parse --show-toplevel) "desktop")
+$env:ELECTRON_MIRROR = "https://npmmirror.com/mirrors/electron/"
+npm install
+```
+
+不要通过关闭 `strict-ssl` 或设置 `NODE_TLS_REJECT_UNAUTHORIZED=0` 绕过证书校验。
+
+**`npm install` 同时出现 `EBUSY` 或 `EPERM`**
+
+这些通常是 Electron 下载失败后的清理错误。先关闭所有 Electron、Vite、Node 和终端进程，再设置镜像并重新执行 `npm install`。如果目录仍被占用，重启终端后再试。
 
 ## 配置
 
