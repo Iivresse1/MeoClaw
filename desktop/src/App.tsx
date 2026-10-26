@@ -37,7 +37,10 @@ interface TaskEvent {
   detail?: string;
   message?: string;
   command?: string;
-  plan?: string;
+  plan_summary?: string;
+  passed?: boolean;
+  checks?: unknown[];
+  results?: unknown[];
 }
 
 function truncate(s: string, n = 90): string {
@@ -141,7 +144,10 @@ export default function App() {
         setSteps((s) => [...s, { kind: "节点", text: ev.node || ev.name || "" }]);
         break;
       case "plan":
-        setSteps((s) => [...s, { kind: "计划", text: truncate(ev.content || ev.plan || "") }]);
+        setSteps((s) => [
+          ...s,
+          { kind: "计划", text: truncate(ev.plan_summary || ev.content || "") },
+        ]);
         break;
       case "tool_call":
         setSteps((s) => [...s, { kind: "工具", text: ev.name || ev.tool || "" }]);
@@ -153,7 +159,13 @@ export default function App() {
         setSteps((s) => [...s, { kind: "校验命令", text: truncate(ev.command || ev.content || "") }]);
         break;
       case "verification":
-        setSteps((s) => [...s, { kind: "校验", text: truncate(ev.content || "") }]);
+        setSteps((s) => [
+          ...s,
+          {
+            kind: "校验",
+            text: `${ev.passed ? "通过" : "未通过"} · ${(ev.checks || []).length} 项检查`,
+          },
+        ]);
         break;
       case "react_done":
         setSteps((s) => [...s, { kind: "回合完成", text: truncate(ev.content || "") }]);

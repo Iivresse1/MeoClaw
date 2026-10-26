@@ -27,6 +27,7 @@ def _conn():
 
 
 def init() -> None:
+    DB.parent.mkdir(parents=True, exist_ok=True)
     with _conn() as c:
         c.execute("CREATE TABLE IF NOT EXISTS sessions(id TEXT PRIMARY KEY, title TEXT, mode TEXT, created_at REAL)")
         c.execute("CREATE TABLE IF NOT EXISTS messages(id INTEGER PRIMARY KEY AUTOINCREMENT, session_id TEXT, role TEXT, content TEXT, meta TEXT, created_at REAL)")
@@ -45,11 +46,26 @@ def list_sessions(limit: int = 100) -> list[dict]:
     return [dict(r) for r in rows]
 
 
-def delete_session(sid: str) -> None:
+def session_exists(sid: str) -> bool:
     with _conn() as c:
+        row = c.execute("SELECT 1 FROM sessions WHERE id=?", (sid,)).fetchone()
+    return row is not None
+
+
+def delete_session(sid: str) -> bool:
+    if not config.SESSION_ID_RE.fullmatch(str(sid or "")):
+        return False
+    with _conn() as c:
+        exists = c.execute("SELECT 1 FROM sessions WHERE id=?", (sid,)).fetchone()
+        if exists is None:
+            return False
         c.execute("DELETE FROM sessions WHERE id=?", (sid,))
         c.execute("DELETE FROM messages WHERE session_id=?", (sid,))
-    shutil.rmtree(config.SESSIONS / sid, ignore_errors=True)
+    root = config.SESSIONS.resolve()
+    workspace = (root / sid).resolve()
+    if workspace.parent == root and workspace.exists():
+        shutil.rmtree(workspace)
+    return True
 
 
 def add_message(sid: str, role: str, content: str, meta: dict | None = None) -> None:

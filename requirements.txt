@@ -1,3 +1,4 @@
+# -*- coding: utf-8 -*-
 # MeoClaw Desktop 桥接层依赖
 # 后端（本地可编辑安装）：python -m pip install -e D:\Meo_agent
 fastapi>=0.115
@@ -6,5 +7,8 @@ websockets>=12.0
 keyring>=25.0
 pyperclip>=1.8
 pillow>=10.0
-langchain-openai>=0.2
-langchain-core>=0.3
+langchain>=1.4,<2
+langchain-openai>=1.7,<2
+langchain-core>=1.6,<2
+langgraph>=1.2,<2
+langgraph-checkpoint-sqlite>=3.1,<4

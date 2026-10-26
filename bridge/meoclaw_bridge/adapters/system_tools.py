@@ -6,8 +6,8 @@ from pathlib import Path
 from meoclaw.core.paths import WorkspaceError, resolve_in_workspace
 
 
-def build_system_tools(workspace: Path, request_approval) -> list:
-    """request_approval(tool, detail) -> bool：True=允许，False=拒绝（或超时）。"""
+def build_system_tools(workspace: Path) -> list:
+    """Build system tools; approval is enforced by HumanInTheLoopMiddleware."""
     from langchain_core.tools import StructuredTool
     from pydantic import BaseModel, Field
 
@@ -36,8 +36,6 @@ def build_system_tools(workspace: Path, request_approval) -> list:
 
     def clipboard_write(text: str) -> str:
         """写入系统剪贴板（需用户确认）。"""
-        if not request_approval("clipboard_write", f"将写入剪贴板：{text[:120]}"):
-            return "用户拒绝了该操作"
         import pyperclip
 
         pyperclip.copy(text)
@@ -47,8 +45,6 @@ def build_system_tools(workspace: Path, request_approval) -> list:
         """用默认浏览器打开链接（需用户确认）。"""
         if not url.lower().startswith(("http://", "https://")):
             return "仅允许 http(s) 链接"
-        if not request_approval("open_url", f"将打开链接：{url[:160]}"):
-            return "用户拒绝了该操作"
         webbrowser.open(url)
         return "已在默认浏览器打开"
 
@@ -60,8 +56,6 @@ def build_system_tools(workspace: Path, request_approval) -> list:
             return "路径越界：只允许打开会话工作区内的文件"
         if not real.exists():
             return f"文件不存在：{file_path}"
-        if not request_approval("open_file", f"将用系统默认程序打开：{real.name}"):
-            return "用户拒绝了该操作"
         import os
 
         os.startfile(str(real))  # Windows

@@ -1,26 +1,8 @@
-"""底层 ReAct 循环：一次"模型 → 工具 → 模型"的执行，逐事件 yield。
+"""LangChain-backed ReAct event stream used by MeoClaw graph nodes.
 
-这是**节点内部**使用的能力：`graph/nodes.py` 的 actor / verifier 都用它跑工具往返。
-CLI 不再直接用它 —— CLI 消费的是 `core/agent.py` 里驱动整张图的统一事件流。
-
-用法：
-
-    for event in stream_react_events("给 utils.py 加个 add 函数", workspace="./workspace"):
-        print(event["type"], event)
-
-事件类型（`event["type"]`）：
-
-    ai_message    模型本轮输出，含 content 与 tool_calls
-    tool_call     即将执行的工具调用（name / args / id）
-    tool_result   工具执行结果（result 原文 + content JSON 串 + ok 标志）
-    final_answer  收尾：最后一条有文本的 AI 消息 + 停止原因
-
-工具失败（ToolException：路径越界、正则非法、匹配到多处等）由 `execute_tool` 收敛成
-`ok=False` 的结果文本回给模型，循环不会中断。`stopped_reason == "max_loops"` 时，
-`final_answer` 里的文本可能是循环早期那轮的说明——此时应当视为"任务未完成"。
-
-注意：本模块依赖 langchain，因此**刻意不在 `core/__init__.py` 里 re-export**，
-这样 `import meoclaw` 依旧不会把 langchain 拉进来。
+The model-tool loop is delegated to ``langchain.agents.create_agent``.  This
+module only adapts its native stream into MeoClaw's event contract and validates
+input/output edge cases.
 """
 
 from __future__ import annotations
@@ -29,16 +11,23 @@ import json
 from collections.abc import Iterator, Mapping, Sequence
 from pathlib import Path
 from typing import Any
+from uuid import uuid4
 
+from langchain.agents import create_agent
+from langchain.agents.middleware import AgentMiddleware
 from langchain_core.language_models import BaseChatModel
 from langchain_core.messages import (
+    AIMessage,
     BaseMessage,
     HumanMessage,
-    SystemMessage,
     ToolMessage,
 )
-from langchain_core.tools import StructuredTool
+from langchain_core.outputs import ChatGeneration, ChatResult
+from langgraph.types import Command
+from pydantic import Field
 
+from meoclaw.core.context_builder import tag_message_context
+from meoclaw.core.middleware import build_agent_middleware
 from meoclaw.core.state import RuntimeState
 from meoclaw.prompts.stage2 import ACTOR_PROMPT
 from meoclaw.providers.openai_provider import create_model
@@ -53,9 +42,6 @@ __all__ = [
     "stream_react_events",
 ]
 
-# ACTOR_PROMPT 统一维护在 meoclaw.prompts.stage2，这里 re-export 方便引用。
-
-#: ReAct 循环会产出的事件类型（便于消费方做穷举分支）
 REACT_EVENT_TYPES: tuple[str, ...] = (
     "ai_message",
     "tool_call",
@@ -65,11 +51,6 @@ REACT_EVENT_TYPES: tuple[str, ...] = (
 
 
 def message_text(content: Any) -> str:
-    """把模型返回的 content 统一成纯文本。
-
-    content 可能是 str，也可能是 content blocks 列表
-    （`[{"type": "text", "text": "..."}]`）。
-    """
     if content is None:
         return ""
     if isinstance(content, str):
@@ -79,59 +60,97 @@ def message_text(content: Any) -> str:
         for block in content:
             if isinstance(block, str):
                 chunks.append(block)
-            elif isinstance(block, dict):
-                text = block.get("text")
-                if isinstance(text, str):
-                    chunks.append(text)
+            elif isinstance(block, Mapping) and isinstance(block.get("text"), str):
+                chunks.append(block["text"])
         return "\n".join(chunk for chunk in chunks if chunk)
     return str(content)
 
 
 def serialize_tool_result(result: Any) -> str:
-    """把工具返回值编码成 `ToolMessage.content`（统一走 JSON）。"""
     try:
         return json.dumps(result, ensure_ascii=False, default=str)
-    except (TypeError, ValueError):  # pragma: no cover - default=str 基本兜住了
+    except (TypeError, ValueError):  # pragma: no cover - default=str is enough
         return json.dumps(str(result), ensure_ascii=False)
 
 
-def _call_field(call: Any, key: str, default: Any) -> Any:
-    """安全读取 tool_call 字段：兼容个别网关返回的非 Mapping 结构。"""
-    if isinstance(call, Mapping):
-        return call.get(key, default)
-    return default
-
-
 def execute_tool(
-    tool_map: Mapping[str, StructuredTool],
+    tool_map: Mapping[str, Any],
     call: Mapping[str, Any],
 ) -> tuple[bool, Any]:
-    """执行一次工具调用。
+    """Compatibility helper retained for callers/tests.
 
-    Args:
-        tool_map: `{工具名: StructuredTool}`。
-        call: 模型给出的 tool_call，含 `name` 与 `args`。
-
-    Returns:
-        `(ok, result)`。未知工具、结构异常或执行抛错时 `ok=False`，
-        `result` 是给模型看的错误文本——单个工具失败不应该中断整个循环。
+    Production agent execution now happens inside LangChain's ToolNode, which is
+    guarded by ``ToolErrorMiddleware`` and ``ToolCallLimitMiddleware``.
     """
     if not isinstance(call, Mapping):
         return False, f"非法的 tool_call 结构：{call!r}"
-
     name = str(call.get("name") or "")
     args = call.get("args") or {}
-
     tool = tool_map.get(name)
     if tool is None:
         return False, f"未知工具 {name!r}；可用工具：{', '.join(tool_map)}"
-
     try:
         return True, tool.invoke(args)
-    except KeyboardInterrupt:  # pragma: no cover - 交给上层
+    except KeyboardInterrupt:  # pragma: no cover
         raise
     except Exception as exc:
         return False, f"工具执行失败：{type(exc).__name__}: {exc}"
+
+
+class _DuckChatModel(BaseChatModel):
+    """Adapt the repository's scripted test models to BaseChatModel."""
+
+    delegate: Any = Field(exclude=True)
+
+    @property
+    def _llm_type(self) -> str:
+        return "meoclaw-duck"
+
+    def bind_tools(self, tools: Any, **kwargs: Any) -> _DuckChatModel:
+        bind = getattr(self.delegate, "bind_tools", None)
+        if callable(bind):
+            try:
+                self.delegate = bind(tools, **kwargs)
+            except TypeError:
+                # Legacy scripted models in the test-suite accept only tools.
+                self.delegate = bind(tools)
+        return self
+
+    def _generate(
+        self,
+        messages: list[BaseMessage],
+        stop: list[str] | None = None,
+        run_manager: Any = None,
+        **kwargs: Any,
+    ) -> ChatResult:
+        response = self.delegate.invoke(messages, **kwargs)
+        if not isinstance(response, AIMessage):
+            response = AIMessage(content=message_text(response))
+        return ChatResult(generations=[ChatGeneration(message=response)])
+
+
+def _as_chat_model(model: Any) -> BaseChatModel:
+    if isinstance(model, BaseChatModel):
+        return model
+    return _DuckChatModel(delegate=model)
+
+
+def _decode_tool_content(content: Any) -> Any:
+    if isinstance(content, str):
+        try:
+            return json.loads(content)
+        except json.JSONDecodeError:
+            if content.startswith("Error:") and " is not a valid tool" in content:
+                return f"未知工具：{content}"
+            return content
+    return content
+
+
+def _tool_result_ok(message: ToolMessage) -> bool:
+    if str(getattr(message, "status", "") or "") == "error":
+        return False
+    payload = _decode_tool_content(message.content)
+    return not (isinstance(payload, Mapping) and payload.get("ok") is False)
 
 
 def stream_react_events(
@@ -139,130 +158,216 @@ def stream_react_events(
     *,
     workspace: str | Path | None = None,
     max_loops: int = 10,
-    model: BaseChatModel | None = None,
+    model: Any = None,
     model_name: str | None = None,
     temperature: float = 0.0,
     runtime: RuntimeState | None = None,
-    tools: Sequence[StructuredTool] | None = None,
+    tools: Sequence[Any] | None = None,
     system_prompt: str = ACTOR_PROMPT,
     message_sink: list[BaseMessage] | None = None,
+    input_messages: Sequence[BaseMessage] | None = None,
+    role: str = "actor",
+    task_id: str = "",
+    approval_tools: Sequence[str] | None = None,
+    checkpointer: Any = None,
+    middleware: Sequence[AgentMiddleware] | None = None,
+    extra_middleware: Sequence[AgentMiddleware] | None = None,
+    summary_token_limit: int = 80_000,
+    resume: Any = None,
 ) -> Iterator[dict[str, Any]]:
-    """跑一轮 ReAct 循环，逐事件 yield。
-
-    Args:
-        task: 用户任务描述。
-        workspace: 工作区目录（不存在会自动创建）；与 `runtime` 二选一。
-        max_loops: 最大循环轮数（每轮 = 一次模型调用 + 其工具调用）。
-        model: 可注入的模型实例（测试用）；为空时用 `create_model()`。
-        model_name: 覆盖模型名，透传给 `create_model()`。
-        temperature: 采样温度。
-        runtime: 直接复用已有的 `RuntimeState`（图节点会传 `state["runtime"]`）。
-        tools: 覆盖工具集；为空时用 `build_tools(runtime)`。
-            验证节点用它传只读工具集。
-        system_prompt: 系统提示词，默认 `ACTOR_PROMPT`。
-        message_sink: 传入 list 时，本轮的 AI 消息与 ToolMessage 会同步追加进去
-            （图节点据此产出 `state["messages"]` 的增量）。
-
-    Yields:
-        事件字典，`event["type"]` ∈ `REACT_EVENT_TYPES`。
-
-    Raises:
-        ValueError: task 为空、max_loops 非法，或 workspace/runtime 都没给。
-        MissingAPIKeyError: 没有配置 API Key（未注入 model 时）。
-    """
+    """Run a create_agent graph and translate its native stream to events."""
     if not isinstance(task, str) or not task.strip():
         raise ValueError("task 不能为空")
     if not isinstance(max_loops, int) or isinstance(max_loops, bool) or max_loops < 1:
         raise ValueError(f"max_loops 必须是大于 0 的整数，收到 {max_loops!r}")
 
-    # 1) 运行时状态（workspace 自动创建，工具可见范围以它为准）
     if runtime is None:
         if workspace is None:
             raise ValueError("必须提供 workspace 或 runtime 之一")
         runtime = RuntimeState(workspace=workspace)
+    if approval_tools and checkpointer is None:
+        raise ValueError("approval_tools 需要 SQLite/InMemory checkpointer")
 
-    # 2) 工具与模型
-    tool_list: list[StructuredTool] = list(tools) if tools is not None else build_tools(runtime)
-    tool_map: dict[str, StructuredTool] = {tool.name: tool for tool in tool_list}
-    chat_model = model if model is not None else create_model(
-        model=model_name, temperature=temperature
+    tool_list = list(tools) if tools is not None else build_tools(runtime)
+    chat_model = _as_chat_model(
+        model
+        if model is not None
+        else create_model(model=model_name, temperature=temperature)
     )
-    agent = chat_model.bind_tools(tool_list)
+    stack = (
+        list(middleware)
+        if middleware is not None
+        else build_agent_middleware(
+            chat_model,
+            max_model_calls=max_loops,
+            summary_token_limit=summary_token_limit,
+            approval_tools=approval_tools,
+        )
+    )
+    if extra_middleware:
+        stack.extend(extra_middleware)
+    agent = create_agent(
+        chat_model,
+        tools=tool_list,
+        system_prompt=system_prompt,
+        middleware=stack,
+        checkpointer=checkpointer,
+        name=f"{role}-agent",
+    )
 
-    # 3) 初始消息
-    messages: list[BaseMessage] = [
-        SystemMessage(content=system_prompt),
-        HumanMessage(content=task),
-    ]
+    initial = list(input_messages) if input_messages is not None else []
+    if not initial:
+        initial = [HumanMessage(content=task)]
+    thread_id = str((runtime.metadata or {}).get("thread_id") or "")
+    if checkpointer is not None and not thread_id:
+        thread_id = f"{role}-{uuid4().hex}"
+    config: dict[str, Any] = {
+        "recursion_limit": max(60, max_loops * 12 + 30)
+    }
+    if thread_id:
+        config["configurable"] = {"thread_id": thread_id}
 
+    loops = 0
     last_ai_text = ""
-    loops_run = 0
-    stopped_reason = "max_loops"
+    stopped_reason = "end"
+    saw_final = False
+    paused = False
+    emitted_ai_ids: set[str] = set()
+    pending_calls: list[dict[str, Any]] = []
 
-    for loop_index in range(1, max_loops + 1):
-        loops_run = loop_index
-
-        response = agent.invoke(messages)
-        messages.append(response)
-        if message_sink is not None:
-            message_sink.append(response)
-
-        text = message_text(getattr(response, "content", ""))
-        if text.strip():
-            last_ai_text = text
-        tool_calls = list(getattr(response, "tool_calls", None) or [])
-
-        yield {
-            "type": "ai_message",
-            "content": text,
-            "tool_calls": tool_calls,
-            "loop": loop_index,
-        }
-
-        if not tool_calls:
-            stopped_reason = "no_tool_calls"
+    stream_input: Any = Command(resume=resume) if resume is not None else {"messages": initial}
+    for chunk in agent.stream(
+        stream_input,
+        config=config,
+        stream_mode="updates",
+    ):
+        if not isinstance(chunk, Mapping):
+            continue
+        interrupts = chunk.get("__interrupt__")
+        if interrupts:
+            for item in interrupts:
+                value = getattr(item, "value", {}) or {}
+                tool_name = str(value.get("name") or "")
+                call = next(
+                    (
+                        pending
+                        for pending in pending_calls
+                        if str(pending.get("id") or "")
+                        == str(value.get("tool_call_id") or "")
+                    ),
+                    None,
+                )
+                if call is not None:
+                    pending_calls.remove(call)
+                    yield {
+                        "type": "tool_call",
+                        "name": str(call.get("name") or ""),
+                        "args": call.get("args") or {},
+                        "id": str(call.get("id") or ""),
+                        "loop": loops,
+                    }
+                yield {
+                    "type": "approval_request",
+                    "id": str(getattr(item, "id", "") or ""),
+                    "tool": tool_name,
+                    "args": value.get("args") or {},
+                    "detail": str(value.get("description") or ""),
+                    "thread_id": thread_id,
+                    "loop": loops,
+                }
+            paused = True
             break
+        update = chunk.get("model")
+        if isinstance(update, Mapping):
+            for message in update.get("messages") or []:
+                if not isinstance(message, AIMessage):
+                    continue
+                loops += 1
+                message_id = str(message.id or f"ai-{loops}")
+                if message_id in emitted_ai_ids:
+                    continue
+                emitted_ai_ids.add(message_id)
+                text = message_text(message.content)
+                if text.strip():
+                    last_ai_text = text
+                tool_calls = list(message.tool_calls or [])
+                yield {
+                    "type": "ai_message",
+                    "content": text,
+                    "tool_calls": tool_calls,
+                    "loop": loops,
+                }
+                pending_calls.extend(dict(call) for call in tool_calls)
+                if not tool_calls:
+                    saw_final = True
+                    stopped_reason = "no_tool_calls"
+                tagged = tag_message_context(
+                    message,
+                    role=role,
+                    task_id=task_id or thread_id,
+                    visible_to=(
+                        ["planner", "actor", "verifier", "final"]
+                        if role != "verifier"
+                        else ["actor", "verifier", "final"]
+                    ),
+                )
+                if message_sink is not None:
+                    message_sink.append(tagged)
 
-        for call_index, call in enumerate(tool_calls, start=1):
-            name = str(_call_field(call, "name", "") or "")
-            args = _call_field(call, "args", None) or {}
-            raw_id = _call_field(call, "id", None)
-            if isinstance(raw_id, str) and raw_id:
-                call_id = raw_id
-            else:
-                call_id = f"call_{loop_index}_{call_index}"
-                if isinstance(call, dict):
-                    # 回填合成 id：AIMessage 的 tool_calls 与后续 ToolMessage 必须严格配对，
-                    # 否则下一轮请求会被服务端拒绝（找不到对应的 tool_call_id）。
-                    call["id"] = call_id
+        update = chunk.get("tools")
+        if isinstance(update, Mapping):
+            for message in update.get("messages") or []:
+                if not isinstance(message, ToolMessage):
+                    continue
+                payload = _decode_tool_content(message.content)
+                call_id = str(message.tool_call_id or "")
+                call = next(
+                    (item for item in pending_calls if str(item.get("id") or "") == call_id),
+                    None,
+                )
+                if call is None and pending_calls:
+                    call = pending_calls[0]
+                if call is not None:
+                    pending_calls.remove(call)
+                    yield {
+                        "type": "tool_call",
+                        "name": str(call.get("name") or ""),
+                        "args": call.get("args") or {},
+                        "id": str(call.get("id") or ""),
+                        "loop": loops,
+                    }
+                yield {
+                    "type": "tool_result",
+                    "name": message.name or "",
+                    "result": payload,
+                    "content": serialize_tool_result(payload),
+                    "ok": _tool_result_ok(message),
+                    "loop": loops,
+                }
+                tagged = tag_message_context(
+                    message,
+                    role=role,
+                    task_id=task_id or thread_id,
+                    visible_to=["actor", "verifier", "final"],
+                )
+                if message_sink is not None:
+                    message_sink.append(tagged)
 
-            yield {
-                "type": "tool_call",
-                "name": name,
-                "args": args,
-                "id": call_id,
-                "loop": loop_index,
-            }
-
-            ok, result = execute_tool(tool_map, call)
-            payload = serialize_tool_result(result)
-            tool_message = ToolMessage(content=payload, tool_call_id=call_id)
-            messages.append(tool_message)
-            if message_sink is not None:
-                message_sink.append(tool_message)
-
-            yield {
-                "type": "tool_result",
-                "name": name,
-                "result": result,
-                "content": payload,
-                "ok": ok,
-                "loop": loop_index,
-            }
-
+    for call in pending_calls:
+        yield {
+            "type": "tool_call",
+            "name": str(call.get("name") or ""),
+            "args": call.get("args") or {},
+            "id": str(call.get("id") or ""),
+            "loop": loops,
+        }
+    if paused:
+        stopped_reason = "approval_required"
+    elif not saw_final and loops >= max_loops:
+        stopped_reason = "max_loops"
     yield {
         "type": "final_answer",
         "content": last_ai_text,
-        "loops": loops_run,
+        "loops": loops,
         "stopped_reason": stopped_reason,
     }

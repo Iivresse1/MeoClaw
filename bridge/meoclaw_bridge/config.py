@@ -5,6 +5,8 @@
 """
 import json
 import os
+import re
+import secrets
 from pathlib import Path
 
 APP_NAME = "MeoClawDesktop"
@@ -12,6 +14,9 @@ BASE = Path(os.environ.get("APPDATA", str(Path.home()))) / APP_NAME
 SESSIONS = BASE / "sessions"
 SETTINGS_FILE = BASE / "settings.json"
 FALLBACK_SECRETS = BASE / ".secrets.json"
+BRIDGE_TOKEN_FILE = BASE / "bridge_token"
+CHECKPOINTS_DB = BASE / "checkpoints.sqlite"
+SESSION_ID_RE = re.compile(r"^[a-f0-9]{12}$")
 
 DEFAULTS = {
     "temperature": 0.0,
@@ -21,9 +26,6 @@ DEFAULTS = {
     "active_provider": "",           # 当前供应商 name
     "sidebar_open": True,
 }
-
-SESSIONS.mkdir(parents=True, exist_ok=True)
-
 
 def load_settings() -> dict:
     s = dict(DEFAULTS)
@@ -98,6 +100,43 @@ def get_active_provider(settings: dict | None = None) -> dict | None:
 
 
 def session_workspace(session_id: str) -> Path:
-    ws = SESSIONS / session_id
+    if not SESSION_ID_RE.fullmatch(str(session_id or "")):
+        raise ValueError("非法 session_id")
+    root = SESSIONS.resolve()
+    ws = (root / session_id).resolve()
+    if ws.parent != root:
+        raise ValueError("session_id 越出会话目录")
     ws.mkdir(parents=True, exist_ok=True)
     return ws
+
+
+def get_or_create_bridge_token() -> str:
+    configured = os.environ.get("MEOCLAW_BRIDGE_TOKEN", "").strip()
+    if configured:
+        return configured
+    if BRIDGE_TOKEN_FILE.exists():
+        try:
+            existing = BRIDGE_TOKEN_FILE.read_text(encoding="utf-8").strip()
+            if existing:
+                return existing
+        except OSError:
+            pass
+    token = secrets.token_urlsafe(32)
+    BRIDGE_TOKEN_FILE.parent.mkdir(parents=True, exist_ok=True)
+    BRIDGE_TOKEN_FILE.write_text(token, encoding="utf-8")
+    try:
+        BRIDGE_TOKEN_FILE.chmod(0o600)
+    except OSError:
+        pass
+    return token
+
+
+def allowed_origins() -> list[str]:
+    configured = os.environ.get("MEOCLAW_ALLOWED_ORIGINS", "")
+    if configured.strip():
+        return [item.strip() for item in configured.split(",") if item.strip()]
+    return [
+        "http://localhost:5173",
+        "http://127.0.0.1:5173",
+        "null",  # packaged file:// renderer; still requires capability token
+    ]

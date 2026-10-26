@@ -1,6 +1,10 @@
 /** 桥接服务 API 客户端（REST + WS） */
 
-const PORT = (window as { meoclaw?: { bridgePort?: number } }).meoclaw?.bridgePort ?? 8931;
+const runtime = (window as {
+  meoclaw?: { bridgePort?: number; bridgeToken?: string };
+}).meoclaw;
+const PORT = runtime?.bridgePort ?? 8931;
+const TOKEN = runtime?.bridgeToken ?? "";
 const BASE = `http://127.0.0.1:${PORT}`;
 
 export interface Session {
@@ -37,7 +41,10 @@ export interface Settings {
 
 async function j<T>(path: string, opts: RequestInit = {}): Promise<T> {
   const r = await fetch(BASE + path, {
-    headers: { "Content-Type": "application/json" },
+    headers: {
+      "Content-Type": "application/json",
+      Authorization: `Bearer ${TOKEN}`,
+    },
     ...opts,
   });
   if (!r.ok) throw new Error(`${r.status} ${await r.text()}`);
@@ -69,5 +76,7 @@ export const api = {
 };
 
 export function taskSocket(taskId: string): WebSocket {
-  return new WebSocket(`ws://127.0.0.1:${PORT}/ws/task/${taskId}`);
+  return new WebSocket(
+    `ws://127.0.0.1:${PORT}/ws/task/${taskId}?token=${encodeURIComponent(TOKEN)}`
+  );
 }

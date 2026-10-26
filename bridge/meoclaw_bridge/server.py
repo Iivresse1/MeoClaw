@@ -6,22 +6,69 @@ WS：/ws/task/{task_id} 推送 runner 事件流；final_answer 自动落库为�
 启动：python -m meoclaw_bridge.server（环境变量 MEOCLAW_BRIDGE_PORT，默认 8931）
 """
 import asyncio
+import hmac
 import os
 import queue
+import shutil
 import uuid
 
 import uvicorn
-from fastapi import FastAPI, WebSocket, WebSocketDisconnect
+from fastapi import FastAPI, Request, WebSocket, WebSocketDisconnect
 from fastapi.middleware.cors import CORSMiddleware
+from fastapi.responses import JSONResponse
 from pydantic import BaseModel
+
+from meoclaw.core.checkpoints import create_checkpointer
 
 from . import config, store
 from .adapters import model_factory, runner
 
 app = FastAPI(title="MeoClaw Bridge")
-app.add_middleware(CORSMiddleware, allow_origins=["*"], allow_methods=["*"], allow_headers=["*"])
+app.add_middleware(
+    CORSMiddleware,
+    allow_origins=config.allowed_origins(),
+    allow_methods=["GET", "POST", "DELETE", "OPTIONS"],
+    allow_headers=["Authorization", "Content-Type"],
+)
+
+BRIDGE_TOKEN = ""
+CHECKPOINTS = None
 
 TASKS: dict[str, tuple[str, queue.Queue]] = {}  # task_id -> (session_id, 事件队列)
+
+
+def _authorized(value: str) -> bool:
+    global BRIDGE_TOKEN
+    if not BRIDGE_TOKEN:
+        BRIDGE_TOKEN = config.get_or_create_bridge_token()
+    token = value.removeprefix("Bearer ").strip()
+    return bool(token) and hmac.compare_digest(token, BRIDGE_TOKEN)
+
+
+def _checkpointer():
+    global CHECKPOINTS
+    if CHECKPOINTS is None:
+        CHECKPOINTS = create_checkpointer(config.CHECKPOINTS_DB)
+    return CHECKPOINTS.saver
+
+
+@app.middleware("http")
+async def require_bridge_token(request: Request, call_next):
+    if request.method == "OPTIONS" or request.url.path == "/api/health":
+        return await call_next(request)
+    if not _authorized(request.headers.get("authorization", "")):
+        origin = request.headers.get("origin", "")
+        headers = (
+            {"Access-Control-Allow-Origin": origin, "Vary": "Origin"}
+            if origin in config.allowed_origins()
+            else None
+        )
+        return JSONResponse(
+            status_code=401,
+            content={"ok": False, "message": "unauthorized"},
+            headers=headers,
+        )
+    return await call_next(request)
 
 
 class TaskReq(BaseModel):
@@ -54,7 +101,12 @@ class TestReq(BaseModel):
 
 @app.get("/api/health")
 def health():
-    return {"ok": True}
+    sandbox = os.environ.get("MEOCLAW_SANDBOX", "docker").lower()
+    return {
+        "ok": True,
+        "sandbox": sandbox,
+        "sandbox_available": sandbox != "docker" or shutil.which("docker") is not None,
+    }
 
 
 @app.get("/api/sessions")
@@ -69,7 +121,14 @@ def messages(sid: str):
 
 @app.delete("/api/sessions/{sid}")
 def remove_session(sid: str):
-    store.delete_session(sid)
+    if not store.delete_session(sid):
+        return {"ok": False, "message": "会话不存在或 ID 非法"}
+    try:
+        _checkpointer().delete_thread(sid)
+    except Exception:
+        # The session DB/workspace are already removed; checkpoint cleanup is
+        # best-effort so a corrupted old checkpoint DB cannot block deletion.
+        pass
     return {"ok": True}
 
 
@@ -142,26 +201,46 @@ def start_task(req: TaskReq):
         return {"ok": False, "message": "任务内容为空"}
     mode = req.mode if req.mode in ("chat", "workspace", "system") else "workspace"
     settings = config.load_settings()
-    sid = req.session_id or store.create_session(task[:60], mode)  # 懒创建：首条消息才建会话
+    if req.session_id:
+        if not config.SESSION_ID_RE.fullmatch(req.session_id) or not store.session_exists(
+            req.session_id
+        ):
+            return {"ok": False, "message": "session_id 非法或会话不存在"}
+        sid = req.session_id
+    else:
+        sid = store.create_session(task[:60], mode)  # 懒创建：首条消息才建会话
     store.add_message(sid, "user", task)
     history = None
     if mode == "chat":
         rows = store.get_messages(sid)
         history = [(r["role"], r["content"]) for r in rows if r["role"] in ("user", "assistant")][:-1]
-    q = runner.start(mode, task, settings, config.session_workspace(sid), history)
     tid = uuid.uuid4().hex[:12]
+    q = runner.start(
+        mode,
+        task,
+        settings,
+        config.session_workspace(sid),
+        history,
+        task_id=tid,
+        session_id=sid,
+        checkpointer=_checkpointer(),
+    )
     TASKS[tid] = (sid, q)
     return {"ok": True, "task_id": tid, "session_id": sid}
 
 
 @app.post("/api/approval/{aid}")
 def resolve_approval(aid: str, req: ApprovalReq):
-    runner.APPROVALS.resolve(aid, req.decision)
+    if not runner.resume_approval(aid, req.decision):
+        return {"ok": False, "message": "审批不存在、已过期或任务已结束"}
     return {"ok": True}
 
 
 @app.websocket("/ws/task/{tid}")
 async def ws_task(ws: WebSocket, tid: str):
+    if not _authorized(ws.query_params.get("token", "")):
+        await ws.close(code=4401)
+        return
     await ws.accept()
     rec = TASKS.get(tid)
     if not rec:
@@ -172,7 +251,7 @@ async def ws_task(ws: WebSocket, tid: str):
     try:
         while True:
             try:
-                ev = await asyncio.to_thread(q.get, True, 125)  # 略大于审批超时
+                ev = await asyncio.to_thread(q.get, True, 3600)
             except queue.Empty:
                 await ws.send_json({"type": "error", "message": "等待结果超时"})
                 break
@@ -193,6 +272,7 @@ async def ws_task(ws: WebSocket, tid: str):
 
 def main():
     store.init()
+    _checkpointer()
     port = int(os.environ.get("MEOCLAW_BRIDGE_PORT", "8931"))
     uvicorn.run(app, host="127.0.0.1", port=port, log_level="warning")
 

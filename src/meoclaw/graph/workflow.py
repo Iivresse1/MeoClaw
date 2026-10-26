@@ -18,19 +18,17 @@ from __future__ import annotations
 
 from pathlib import Path
 from typing import TYPE_CHECKING, Any
+from uuid import uuid4
 
+from langchain_core.messages import HumanMessage
 from langgraph.graph import END, START, StateGraph
 
+from meoclaw.core.context_builder import tag_message_context
 from meoclaw.core.state import RuntimeState
 from meoclaw.graph.nodes import (
-    CONTEXT_COMPRESSOR_NODE,
     DEFAULT_MAX_ATTEMPTS,
-    DEFAULT_NEXT_NODE,
     FINAL,
     actor_node,
-    context_compressor_node,
-    context_monitor_node,
-    context_monitor_route,
     final_node,
     planner_node,
     supervisor_node,
@@ -45,7 +43,7 @@ if TYPE_CHECKING:  # pragma: no cover - 仅用于类型提示
 __all__ = ["build_complex_workflow", "build_workflow", "context_compressor_route", "initial_state"]
 
 
-def build_workflow() -> "CompiledStateGraph":
+def build_workflow(checkpointer: Any = None) -> CompiledStateGraph:
     """组装并编译 planner → actor → verifier →（必要时压缩）→ final/planner 的图。
 
     Returns:
@@ -65,8 +63,6 @@ def build_workflow() -> "CompiledStateGraph":
     graph.add_node("planner", planner_node)
     graph.add_node("actor", actor_node)
     graph.add_node("verifier", verifier_node)
-    graph.add_node("context_monitor", context_monitor_node)
-    graph.add_node(CONTEXT_COMPRESSOR_NODE, context_compressor_node)
     graph.add_node("final", final_node)
 
     graph.add_edge(START, "planner")
@@ -75,23 +71,11 @@ def build_workflow() -> "CompiledStateGraph":
     graph.add_conditional_edges(
         "verifier",
         verifier_route,
-        {FINAL: "final", "planner": "context_monitor"},
+        {FINAL: "final", "planner": "planner"},
     )
-    graph.add_conditional_edges(
-        "context_monitor",
-        context_monitor_route,
-        {
-            FINAL: "final",
-            CONTEXT_COMPRESSOR_NODE: CONTEXT_COMPRESSOR_NODE,
-            "planner": "planner",
-            "verifier": "verifier",
-            "actor": "actor",
-        },
-    )
-    graph.add_edge(CONTEXT_COMPRESSOR_NODE, "planner")
     graph.add_edge("final", END)
 
-    return graph.compile()
+    return graph.compile(checkpointer=checkpointer)
 
 
 def context_compressor_route(state: MeoGraphState) -> str:
@@ -100,10 +84,10 @@ def context_compressor_route(state: MeoGraphState) -> str:
     压缩只会在"没通过"的分支上发生（`context_monitor_route` 先判 `passed`），
     所以这里的值通常是 `"planner"`（继续修）或 `"final"`（试满了）。
     """
-    return str(state.get("context_next_node") or DEFAULT_NEXT_NODE)
+    return str(state.get("context_next_node") or "verifier")
 
 
-def build_complex_workflow() -> "CompiledStateGraph":
+def build_complex_workflow(checkpointer: Any = None) -> CompiledStateGraph:
     """完整的 supervisor 拓扑：planner 直接面对 verifier，**没有 actor 节点**。
 
         START → planner(supervisor) → context_monitor ─┬─ 需要压缩 → context_compressor ─┐
@@ -123,36 +107,19 @@ def build_complex_workflow() -> "CompiledStateGraph":
     graph = StateGraph(MeoGraphState)
 
     graph.add_node("planner", supervisor_node)
-    graph.add_node("context_monitor", context_monitor_node)
-    graph.add_node(CONTEXT_COMPRESSOR_NODE, context_compressor_node)
     graph.add_node("verifier", verifier_node)
     graph.add_node("final", final_node)
 
     graph.add_edge(START, "planner")
-    graph.add_edge("planner", "context_monitor")
+    graph.add_edge("planner", "verifier")
     graph.add_conditional_edges(
-        "context_monitor",
-        context_monitor_route,
-        {
-            CONTEXT_COMPRESSOR_NODE: CONTEXT_COMPRESSOR_NODE,
-            "verifier": "verifier",
-            "planner": "planner",
-            FINAL: "final",
-        },
+        "verifier",
+        verifier_route,
+        {FINAL: "final", "planner": "planner"},
     )
-    graph.add_conditional_edges(
-        CONTEXT_COMPRESSOR_NODE,
-        context_compressor_route,
-        {
-            "verifier": "verifier",
-            "planner": "planner",
-            FINAL: "final",
-        },
-    )
-    graph.add_edge("verifier", "context_monitor")  # 验证后也过 monitor
     graph.add_edge("final", END)
 
-    return graph.compile()
+    return graph.compile(checkpointer=checkpointer)
 
 
 def initial_state(
@@ -162,6 +129,9 @@ def initial_state(
     max_attempts: int = DEFAULT_MAX_ATTEMPTS,
     runtime: RuntimeState | None = None,
     model: Any = None,
+    task_id: str | None = None,
+    session_id: str | None = None,
+    sandbox_mode: str | None = None,
 ) -> dict[str, Any]:
     """构造调用图所需的初始状态（顺带创建/校验 workspace）。
 
@@ -189,10 +159,24 @@ def initial_state(
 
     if model is not None:
         runtime.metadata["model"] = model
+    task_id = str(task_id or uuid4().hex)
+    session_id = str(session_id or runtime.metadata.get("session_id") or task_id)
+    runtime.metadata["task_id"] = task_id
+    runtime.metadata["session_id"] = session_id
+    runtime.metadata["thread_id"] = session_id
+    if sandbox_mode:
+        runtime.metadata["sandbox"] = sandbox_mode
+    user_message = tag_message_context(
+        HumanMessage(content=task),
+        role="planner",
+        task_id=task_id,
+        visible_to=["planner", "actor", "verifier", "final"],
+    )
 
     return {
         "task": task,
         "runtime": runtime,
+        "messages": [user_message],
         "max_attempts": max(1, int(max_attempts)),
         "attempts": 0,
         "todos": [],

@@ -159,7 +159,7 @@ def test_real_tool_failure_is_reported_as_ok_false(tmp_path: Path) -> None:
     result_event = next(event for event in events if event["type"] == "tool_result")
 
     assert result_event["ok"] is False
-    assert "不存在" in result_event["result"]
+    assert "不存在" in json.dumps(result_event["result"], ensure_ascii=False)
     assert events[-1]["type"] == "final_answer"
     assert events[-1]["content"] == "文件不存在，我换个思路"
 

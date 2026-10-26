@@ -33,6 +33,7 @@ dist/
 .eggs/
 .venv/
 venv/
+pyruntime/
 env/
 .Python
 
@@ -42,6 +43,9 @@ env/
 .ruff_cache/
 .coverage
 htmlcov/
+node_modules/
+*.sqlite
+*.sqlite3
 
 # 运行时工作区（工具产物默认落在这里）
 /workspace/

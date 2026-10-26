@@ -1,0 +1,8 @@
+.git
+.pytest_cache
+__pycache__
+*.pyc
+desktop/node_modules
+workspace
+*.sqlite
+.env

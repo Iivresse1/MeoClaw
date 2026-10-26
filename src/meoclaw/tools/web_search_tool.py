@@ -18,7 +18,7 @@ from __future__ import annotations
 import os
 from typing import Any
 
-from langchain_core.tools import StructuredTool
+from langchain_core.tools import StructuredTool, ToolException
 from pydantic import BaseModel, Field
 
 from meoclaw.providers.openai_provider import load_env
@@ -135,7 +135,14 @@ def build_web_search_tool() -> StructuredTool:
     def web_search_tool(
         query: str, max_results: int = 5, include_answer: bool = True
     ) -> dict[str, Any]:
-        return web_search(query, max_results=max_results, include_answer=include_answer)
+        result = web_search(query, max_results=max_results, include_answer=include_answer)
+        if result.get("ok") is False and _is_retryable_search_error(
+            str(result.get("error") or "")
+        ):
+            # ToolRetryMiddleware can only retry exceptions. Missing credentials
+            # and invalid input remain structured, non-retryable results.
+            raise ToolException(f"temporary web search failure: {result['error']}")
+        return result
 
     return StructuredTool.from_function(
         func=web_search_tool,
@@ -148,3 +155,20 @@ def build_web_search_tool() -> StructuredTool:
         # 检索失败不抛异常而是 ok=False 的结构化结果，无需 handle_tool_error
         handle_validation_error=True,
     )
+
+
+def _is_retryable_search_error(error: str) -> bool:
+    text = error.lower()
+    markers = (
+        "timeout",
+        "timed out",
+        "connection",
+        "connect",
+        "429",
+        "500",
+        "502",
+        "503",
+        "504",
+        "temporarily unavailable",
+    )
+    return any(marker in text for marker in markers)

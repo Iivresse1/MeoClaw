@@ -47,7 +47,11 @@ READ_ONLY_TOOL_NAMES: tuple[str, ...] = (
 )
 
 
-def build_tools(state: RuntimeState) -> list[StructuredTool]:
+def build_tools(
+    state: RuntimeState,
+    *,
+    include_bash: bool = True,
+) -> list[StructuredTool]:
     """构建绑定到 `state.workspace` 的全部工具。
 
     Args:
@@ -56,15 +60,14 @@ def build_tools(state: RuntimeState) -> list[StructuredTool]:
     Returns:
         与 `TOOL_NAMES` 顺序一致的 StructuredTool 列表。
     """
-    tools: list[StructuredTool] = [
-        *build_file_tools(state),
-        build_grep_tool(state),
-        build_bash_tool(state),
-    ]
+    tools: list[StructuredTool] = [*build_file_tools(state), build_grep_tool(state)]
+    if include_bash:
+        tools.append(build_bash_tool(state))
 
     names = tuple(tool.name for tool in tools)
-    if names != TOOL_NAMES:
-        raise RuntimeError(f"工具注册结果不符合预期：期望 {TOOL_NAMES}，实际 {names}")
+    expected = TOOL_NAMES if include_bash else TOOL_NAMES[:-1]
+    if names != expected:
+        raise RuntimeError(f"工具注册结果不符合预期：期望 {expected}，实际 {names}")
     return tools
 
 

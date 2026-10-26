@@ -45,11 +45,13 @@ from langgraph.graph.message import REMOVE_ALL_MESSAGES
 from meoclaw.agents.code_agent import CODE_AGENT_NAME, run_code_agent
 from meoclaw.agents.search_agent import SEARCH_AGENT_NAME, run_search_agent
 from meoclaw.core.context import Emit, require_runtime, resolve_emit, resolve_model
+from meoclaw.core.context_builder import ContextBuilder, tag_message_context
 from meoclaw.core.react import (
     message_text,
     serialize_tool_result,
     stream_react_events,
 )
+from meoclaw.core.sandbox import build_sandbox_shell_middleware, sandbox_mode
 from meoclaw.core.state import RuntimeState
 from meoclaw.graph.memory import (
     append_history_summary,
@@ -70,13 +72,17 @@ from meoclaw.prompts import (
 from meoclaw.tools.bash_tool import execute_command
 from meoclaw.tools.registry import build_read_only_tools, build_tools
 from meoclaw.tools.todo_tool import (
+    TodoWriteInput,
     TodoWriteTool,
+    TodoWriteToolName,
     apply_todo_updates,
     build_todo_update_tool,
     drain_todo_updates,
     normalize_plan,
     persist_todos,
 )
+
+_CONTEXT_BUILDER = ContextBuilder()
 
 __all__ = [
     "CALL_CODE_AGENT_TOOL",
@@ -269,7 +275,7 @@ def planner_node(
     Raises:
         PlannerError: 模型既没调工具也没给出可解析的 JSON。
     """
-    require_runtime(state)  # 先校验 runtime 存在（模型与后续节点都依赖它）
+    runtime = require_runtime(state)
     model = resolve_model(state, config)
     emit = resolve_emit(config)
     _emit_node_start(emit, "planner")
@@ -278,12 +284,14 @@ def planner_node(
     if not task:
         raise PlannerError("state['task'] 为空，无法制定计划")
 
-    revising = bool(state.get("todos")) and bool(str(state.get("last_error") or "").strip())
-    brief = _planner_brief(state, task, revising=revising)
+    task_id = str((runtime.metadata or {}).get("task_id") or "")
+    bundle = _CONTEXT_BUILDER.build(
+        "planner", state, PLANNER_PROMPT, task_id=task_id
+    )
 
     planner = model.bind_tools([TodoWriteTool])
     response = planner.invoke(
-        [SystemMessage(content=PLANNER_PROMPT), HumanMessage(content=brief)]
+        [SystemMessage(content=bundle.system_prompt), *bundle.messages]
     )
     plan = extract_plan(response)
 
@@ -292,7 +300,15 @@ def planner_node(
         {"id": "t1", "content": task, "status": "pending", "note": ""}
     ]
 
+    plan_text = json.dumps(plan, ensure_ascii=False, indent=2)
+    planner_message = tag_message_context(
+        AIMessage(content=plan_text),
+        role="planner",
+        task_id=task_id,
+        visible_to=["planner", "actor", "verifier", "final"],
+    )
     return {
+        "messages": [planner_message],
         "plan_summary": plan["plan_summary"] or task,
         "todos": todos,
         "acceptance_criteria": plan["acceptance_criteria"],
@@ -459,8 +475,46 @@ def _build_supervisor_tools(
             )
         return {"ok": True, "summary": result["summary"], "todos": working["todos"]}
 
+    def call_todo_write(
+        plan_summary: str,
+        todos: Sequence[Mapping[str, Any]],
+        acceptance_criteria: Sequence[str] | None = None,
+        verification_commands: Sequence[str] | None = None,
+    ) -> dict[str, Any]:
+        plan = normalize_plan(
+            {
+                "plan_summary": plan_summary,
+                "todos": todos,
+                "acceptance_criteria": acceptance_criteria,
+                "verification_commands": verification_commands,
+            }
+        )
+        if not plan["todos"]:
+            raise ValueError("todos 不能为空")
+        working["plan_summary"] = plan["plan_summary"]
+        working["todos"] = plan["todos"]
+        working["acceptance_criteria"] = plan["acceptance_criteria"]
+        working["verification_commands"] = plan["verification_commands"]
+        persist_todos(
+            require_runtime(working),
+            plan["todos"],
+            plan_summary=plan["plan_summary"],
+        )
+        if emit is not None:
+            emit({"type": "plan_snapshot", "node": "planner", **plan})
+        return {"ok": True, **plan}
+
     return [
-        TodoWriteTool,
+        StructuredTool.from_function(
+            func=call_todo_write,
+            name=TodoWriteToolName,
+            description=(
+                "发布或修订执行计划，包含 plan_summary、todos、"
+                "acceptance_criteria 与 verification_commands。"
+            ),
+            args_schema=TodoWriteInput,
+            handle_validation_error=True,
+        ),
         StructuredTool.from_function(
             func=call_search_agent,
             name=CALL_SEARCH_AGENT_TOOL,
@@ -555,56 +609,36 @@ def supervisor_node(
     _emit_node_start(emit, "planner")
 
     working = dict(state)  # 工具循环里的计划/交接变更先写进这个可变视图
-    memory = build_layered_memory(working, node="planner")
     tools = _build_supervisor_tools(working, emit)
-    tool_map = {tool.name: tool for tool in tools}
-    supervisor = model.bind_tools(tools)
-
-    messages: list[BaseMessage] = [
-        SystemMessage(content=SUPERVISOR_PROMPT),
-        HumanMessage(content=compose_supervisor_brief(working, task, memory)),
-    ]
+    task_id = str((runtime.metadata or {}).get("task_id") or "")
+    bundle = _CONTEXT_BUILDER.build(
+        "planner",
+        working,
+        SUPERVISOR_PROMPT,
+        task_id=task_id,
+        instruction=task,
+    )
     collected: list[BaseMessage] = []
     summary = ""
-
-    for _ in range(MAX_SUPERVISOR_LOOPS):
-        response = supervisor.invoke(messages)
-        collected.append(response)
-        messages.append(response)
-
-        text = message_text(getattr(response, "content", ""))
-        if text.strip():
-            summary = text
-        calls = list(getattr(response, "tool_calls", None) or [])
-        if not calls:
-            break
-
-        for call in calls:
-            name = str((call.get("name") if isinstance(call, Mapping) else "") or "")
-            args = (call.get("args") if isinstance(call, Mapping) else None) or {}
-            if emit is not None:
-                emit({"type": "tool_call", "node": "planner", "name": name, "args": args})
-            tool_message = execute_supervisor_tool(working, emit, call, tool_map)
-            collected.append(tool_message)
-            messages.append(tool_message)
-            if emit is not None:
-                parsed: Any = None
-                try:
-                    parsed = json.loads(tool_message.content)
-                except (TypeError, json.JSONDecodeError):
-                    parsed = tool_message.content
-                emit(
-                    {
-                        "type": "tool_result",
-                        "node": "planner",
-                        "name": name,
-                        "result": parsed,
-                        "ok": not (
-                            isinstance(parsed, Mapping) and parsed.get("ok") is False
-                        ),
-                    }
-                )
-    else:
+    stopped_reason = ""
+    for event in stream_react_events(
+        task,
+        runtime=runtime,
+        max_loops=MAX_SUPERVISOR_LOOPS,
+        model=model,
+        tools=tools,
+        system_prompt=bundle.system_prompt,
+        input_messages=bundle.messages,
+        role="planner",
+        task_id=task_id,
+        message_sink=collected,
+    ):
+        if emit is not None:
+            _forward_react_event(emit, "planner", event)
+        if event.get("type") == "final_answer":
+            summary = str(event.get("content") or "")
+            stopped_reason = str(event.get("stopped_reason") or "")
+    if stopped_reason == "max_loops":
         summary = (
             (summary + "\n\n" if summary else "")
             + f"[supervisor 达到最大轮数 {MAX_SUPERVISOR_LOOPS}，委派可能未完成]"
@@ -704,7 +738,15 @@ def actor_node(
     if not task:
         raise ValueError("state['task'] 为空，actor 无任务可执行")
 
-    tools = [*build_tools(runtime), build_todo_update_tool(runtime)]
+    task_id = str((runtime.metadata or {}).get("task_id") or "")
+    bundle = _CONTEXT_BUILDER.build("actor", state, ACTOR_PROMPT, task_id=task_id)
+    kernel = sandbox_mode(runtime)
+    use_docker = kernel == "docker"
+    tools = [
+        *build_tools(runtime, include_bash=not use_docker),
+        build_todo_update_tool(runtime),
+    ]
+    extra_middleware = [build_sandbox_shell_middleware(runtime)] if use_docker else []
     collected: list[BaseMessage] = []
     summary = ""
     stopped_reason = ""
@@ -715,7 +757,11 @@ def actor_node(
         max_loops=MAX_ACTOR_LOOPS,
         model=model,
         tools=tools,
-        system_prompt=compose_actor_prompt(state),
+        system_prompt=bundle.system_prompt,
+        input_messages=bundle.messages,
+        role="actor",
+        task_id=task_id,
+        extra_middleware=extra_middleware,
         message_sink=collected,
     ):
         if emit is not None:
@@ -954,16 +1000,24 @@ def verifier_node(
         state.get("verification_commands") or [],
         emit=emit,
     )
+    task_id = str((runtime.metadata or {}).get("task_id") or "")
+    verifier_state = {**state, "verification_results": command_results}
+    bundle = _CONTEXT_BUILDER.build(
+        "verifier", verifier_state, VERIFIER_PROMPT, task_id=task_id
+    )
 
     collected: list[BaseMessage] = []
     raw = ""
     for event in stream_react_events(
-        compose_verifier_brief(state, command_results),
+        str(state.get("task") or "验证当前任务"),
         runtime=runtime,
         max_loops=MAX_VERIFIER_LOOPS,
         model=model,
         tools=build_read_only_tools(runtime),
-        system_prompt=VERIFIER_PROMPT,
+        system_prompt=bundle.system_prompt,
+        input_messages=bundle.messages,
+        role="verifier",
+        task_id=task_id,
         message_sink=collected,
     ):
         if emit is not None:
@@ -1116,6 +1170,7 @@ def final_node(
     """
     report = compose_final_report(state)
     passed = bool(state.get("passed"))
+    runtime = require_runtime(state)
 
     emit = resolve_emit(config)
     _emit_node_start(emit, "final")
@@ -1133,7 +1188,14 @@ def final_node(
         except Exception:  # noqa: BLE001 - 总结是尽力而为，失败就退回确定性文本
             pass
 
-    return {"final_answer": report, "passed": passed}
+    task_id = str((runtime.metadata or {}).get("task_id") or "")
+    final_message = tag_message_context(
+        AIMessage(content=report),
+        role="final",
+        task_id=task_id,
+        visible_to=["planner", "actor", "verifier", "final"],
+    )
+    return {"final_answer": report, "passed": passed, "messages": [final_message]}
 
 
 # --------------------------------------------------------------------------- #

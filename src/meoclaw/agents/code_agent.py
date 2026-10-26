@@ -25,7 +25,9 @@ from langchain_core.language_models import BaseChatModel
 from langchain_core.messages import BaseMessage
 
 from meoclaw.core.context import Emit, require_runtime, resolve_emit, resolve_model
+from meoclaw.core.context_builder import ContextBuilder
 from meoclaw.core.react import stream_react_events
+from meoclaw.core.sandbox import build_sandbox_shell_middleware, sandbox_mode
 from meoclaw.core.state import RuntimeState
 from meoclaw.graph.memory import (
     RULES_LAYER,
@@ -36,7 +38,6 @@ from meoclaw.prompts.stage3 import CODE_AGENT_PROMPT
 from meoclaw.tools.notepad_tool import build_notepad_tools
 from meoclaw.tools.registry import build_tools
 from meoclaw.tools.todo_tool import (
-    TODO_FILENAME,
     apply_todo_updates,
     build_todo_update_tool,
     drain_todo_updates,
@@ -62,7 +63,7 @@ DEFAULT_MAX_LOOPS = 10
 def build_code_agent_tools(state: RuntimeState) -> list:
     """codeAgent 的工具集：通用工具 + TodoUpdateTool + 笔记工具。"""
     return [
-        *build_tools(state),
+        *build_tools(state, include_bash=sandbox_mode(state) != "docker"),
         build_todo_update_tool(state),
         *build_notepad_tools(state),
     ]
@@ -163,9 +164,22 @@ def run_code_agent(
     emit = writer if writer is not None else resolve_emit()
 
     tools = build_code_agent_tools(runtime)
+    extra_middleware = (
+        [build_sandbox_shell_middleware(runtime)]
+        if sandbox_mode(runtime) == "docker"
+        else []
+    )
 
     # 三层记忆快照只组装一次：既拼进提示词，也随结果返回（调用方可存进 state["memory_snapshot"]）
     memory_snapshot = build_layered_memory(view, node=CODE_AGENT_NAME)
+    task_id = str((runtime.metadata or {}).get("task_id") or "")
+    bundle = ContextBuilder().build(
+        "actor",
+        view,
+        CODE_AGENT_PROMPT,
+        task_id=task_id,
+        instruction=instruction,
+    )
 
     messages: list[BaseMessage] = []
     tool_events: list[dict[str, Any]] = []
@@ -174,12 +188,16 @@ def run_code_agent(
     loops = 0
 
     for event in stream_react_events(
-        compose_human_message(view, instruction, memory=memory_snapshot),
+        instruction,
         runtime=runtime,
         max_loops=max_loops,
         model=chat_model,
         tools=tools,
-        system_prompt=CODE_AGENT_PROMPT,
+        system_prompt=bundle.system_prompt,
+        input_messages=bundle.messages,
+        role="actor",
+        task_id=task_id,
+        extra_middleware=extra_middleware,
         message_sink=messages,
     ):
         tagged = {**event, "agent": CODE_AGENT_NAME}

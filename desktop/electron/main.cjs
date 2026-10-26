@@ -1,13 +1,33 @@
 // Electron 主进程：启动 pyruntime 桥接子进程 + 渲染窗口（deepseek-harness 式壳层）
-const { app, BrowserWindow, Menu } = require("electron");
+const { app, BrowserWindow, ipcMain, Menu } = require("electron");
 const { spawn } = require("child_process");
+const fs = require("fs");
 const path = require("path");
 const http = require("http");
 
 const ROOT = path.resolve(__dirname, "..", ".."); // D:\MeoClaw-Desktop
-const PY = path.join(ROOT, "pyruntime", "Scripts", "python.exe");
+const BUNDLED_PY = path.join(ROOT, "pyruntime", "Scripts", "python.exe");
+const PY = process.env.MEOCLAW_PYTHON || (fs.existsSync(BUNDLED_PY) ? BUNDLED_PY : "python");
 const PORT = process.env.MEOCLAW_BRIDGE_PORT || "8931";
 let pyProc = null;
+
+function readBridgeToken() {
+  const configured = process.env.MEOCLAW_BRIDGE_TOKEN || "";
+  if (configured) return configured;
+  const base = path.join(process.env.APPDATA || process.env.HOME || "", "MeoClawDesktop");
+  try {
+    return fs.readFileSync(path.join(base, "bridge_token"), "utf8").trim();
+  } catch {
+    return "";
+  }
+}
+
+ipcMain.on("meoclaw:get-runtime", (event) => {
+  event.returnValue = {
+    bridgePort: Number(PORT),
+    bridgeToken: readBridgeToken(),
+  };
+});
 
 function startBridge() {
   pyProc = spawn(PY, ["-m", "meoclaw_bridge.server"], {
@@ -50,6 +70,7 @@ async function createWindow() {
       preload: path.join(__dirname, "preload.cjs"),
       contextIsolation: true,
       nodeIntegration: false,
+      sandbox: true,
     },
   });
   Menu.setApplicationMenu(null); // 无「应用/编辑」菜单

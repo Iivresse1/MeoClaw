@@ -25,6 +25,7 @@ from langchain_core.language_models import BaseChatModel
 from langchain_core.messages import BaseMessage
 
 from meoclaw.core.context import Emit, require_runtime, resolve_emit, resolve_model
+from meoclaw.core.context_builder import ContextBuilder
 from meoclaw.core.react import stream_react_events
 from meoclaw.core.state import RuntimeState
 from meoclaw.graph.memory import build_layered_memory, format_layered_memory_for_prompt
@@ -120,6 +121,14 @@ def run_search_agent(
     emit = writer if writer is not None else resolve_emit()
 
     memory_snapshot = build_layered_memory(view, node=SEARCH_AGENT_NAME)
+    task_id = str((runtime.metadata or {}).get("task_id") or "")
+    bundle = ContextBuilder().build(
+        "actor",
+        view,
+        SEARCH_AGENT_PROMPT,
+        task_id=task_id,
+        instruction=instruction,
+    )
 
     messages: list[BaseMessage] = []
     tool_events: list[dict[str, Any]] = []
@@ -131,12 +140,15 @@ def run_search_agent(
     loops = 0
 
     for event in stream_react_events(
-        compose_search_message(view, instruction, memory=memory_snapshot),
+        instruction,
         runtime=runtime,
         max_loops=max_loops,
         model=chat_model,
         tools=build_search_agent_tools(),
-        system_prompt=SEARCH_AGENT_PROMPT,
+        system_prompt=bundle.system_prompt,
+        input_messages=bundle.messages,
+        role="actor",
+        task_id=task_id,
         message_sink=messages,
     ):
         tagged = {**event, "agent": SEARCH_AGENT_NAME}

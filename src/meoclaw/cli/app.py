@@ -14,10 +14,11 @@
 from __future__ import annotations
 
 import json
+import os
 import sys
-from collections.abc import Iterator
+from collections.abc import Iterator, Sequence
 from pathlib import Path
-from typing import Any, Sequence
+from typing import Any
 
 import typer
 from langchain_core.tools import StructuredTool
@@ -85,7 +86,7 @@ def _can_encode(console: Console, text: str) -> bool:
     return True
 
 
-def _console_capabilities(console: Console) -> tuple[bool, "box.Box"]:
+def _console_capabilities(console: Console) -> tuple[bool, box.Box]:
     """按输出编码选择 emoji 与边框样式。
 
     GBK 之类的编码既装不下 emoji 也装不下 rich 的圆角边框，
@@ -145,7 +146,7 @@ def _stream_events(
     max_attempts: int,
     *,
     emoji_ok: bool,
-    box_style: "box.Box",
+    box_style: box.Box,
 ) -> int:
     """消费统一事件流并按节点实时打印，返回退出码（0 通过 / 1 未通过）。
 
@@ -348,6 +349,7 @@ def _run_agent(
             max_attempts=max_attempts,
             model_name=model_name,
             temperature=temperature,
+            sandbox_mode=os.environ.get("MEOCLAW_SANDBOX", "docker"),
         )
         return _stream_events(
             console, events, max_attempts, emoji_ok=emoji_ok, box_style=box_style

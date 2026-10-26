@@ -107,6 +107,10 @@ def stream_agent_events(
     model_name: str | None = None,
     temperature: float = 0.0,
     runtime: RuntimeState | None = None,
+    task_id: str | None = None,
+    session_id: str | None = None,
+    checkpointer: Any = None,
+    sandbox_mode: str | None = None,
 ) -> Iterator[dict[str, Any]]:
     """跑一遍完整工作流（planner → actor → verifier → final），逐事件 yield。
 
@@ -145,9 +149,21 @@ def stream_agent_events(
         workspace=workspace,
         max_attempts=max_attempts,
         runtime=runtime,
-        model=chat_model,
+        # Model instances are runtime dependencies, not checkpointable state.
+        model=chat_model if checkpointer is None else None,
+        task_id=task_id,
+        session_id=session_id,
+        sandbox_mode=sandbox_mode,
     )
-    workflow = build_workflow()
+    workflow = build_workflow(checkpointer=checkpointer)
+    config: dict[str, Any] = {}
+    if checkpointer is not None:
+        config = {
+            "configurable": {
+                "thread_id": str(inputs["runtime"].metadata.get("thread_id") or session_id),
+                "model": chat_model,
+            }
+        }
 
     passed = False
     attempts = 0
@@ -156,7 +172,9 @@ def stream_agent_events(
     last_error = ""
     next_instruction = ""
 
-    for chunk in workflow.stream(inputs, stream_mode=["updates", "custom"]):
+    for chunk in workflow.stream(
+        inputs, config=config, stream_mode=["updates", "custom"]
+    ):
         # 指定多个 stream_mode 时 langgraph 产出 (mode, payload) 元组
         if isinstance(chunk, tuple) and len(chunk) == 2:
             mode, payload = chunk

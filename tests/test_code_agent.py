@@ -234,7 +234,9 @@ def test_run_code_agent_accepts_runtime_state_directly(runtime: RuntimeState) ->
     assert result["ok"] is True
     assert result["todos"] == []
     assert result["todo_file"] is None
-    assert "## Instruction from planner" in model.calls[0][1].content
+    assert "## Role instruction" in "\n".join(
+        str(message.content) for message in model.calls[0]
+    )
 
 
 def test_run_code_agent_reports_max_loops(state: dict[str, Any]) -> None:

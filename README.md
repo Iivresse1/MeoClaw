@@ -1,6 +1,6 @@
 # MeoClaw
 
-MeoClaw是一个本地桌面的 AI 助理：支持纯对话、工作区文件任务和系统工具（截图/剪贴板/打开链接）三类模式。
+MeoClaw 是一个本地桌面的 AI 助理：支持纯对话、工作区文件任务和系统工具（截图/剪贴板/打开链接）三类模式。1.1 分支使用 LangChain `create_agent` 与 middleware 管理 ReAct 循环、工具错误、调用预算、上下文摘要和人工审批，并通过 SQLite checkpoint 持久化会话。
 
 ## 项目整体架构
 
@@ -9,7 +9,7 @@ MeoClaw是一个本地桌面的 AI 助理：支持纯对话、工作区文件任
 | 桌面壳 | `desktop/electron/` | Electron 33 | 拉起/复用桥接进程、创建窗口、无系统菜单 |
 | 渲染层 | `desktop/src/` | React 18 + TypeScript + Vite | 会话侧边栏、消息流、执行过程卡、审批卡、输入卡片、设置弹窗 |
 | 桥接层 | `bridge/meoclaw_bridge/` | FastAPI + uvicorn + websockets | 仅监听 `127.0.0.1:8931`，REST + WS 封装后端事件流，会话持久化与密钥管理 |
-| 后端核心 | `src/meoclaw/` | langgraph + langchain | `stream_agent_events` / `stream_react_events` 事件流、工作区路径安检 |
+| 后端核心 | `src/meoclaw/` | LangChain 1.x + LangGraph | `create_agent` 循环、middleware、ContextBuilder、SQLite checkpoint、工作区路径安检 |
 
 一次任务的数据流：
 
@@ -59,8 +59,8 @@ MeoClaw是一个本地桌面的 AI 助理：支持纯对话、工作区文件任
 | `POST /api/approval/{aid}` | 审批放行/拒绝 |
 | `WS /ws/task/{tid}` | 推送 runner 事件流，`ui_done` 收尾 |
 
-- `runner.start(mode, task, settings, session_ws, history)` → 事件队列；`chat` 直连模型流式对话，`workspace` 调 `stream_agent_events`，`system` 调 `stream_react_events` + 系统工具
-- `Approvals.request(tool, detail, timeout=120)`：工具线程挂起等待 UI 批准，超时视为拒绝
+- `runner.start(...)`：启动后台任务并把 LangChain/LangGraph 原生事件写入队列；`workspace` 驱动角色图，`system` 驱动带 HITL middleware 的 Agent
+- `runner.resume_approval(...)`：审批后使用 `Command(resume=...)` 恢复 SQLite checkpoint 中的任务
 - `system_tools`：`TakeScreenshot / ClipboardRead / ClipboardWrite / OpenUrl / OpenWorkspaceFile`，路径经 `resolve_in_workspace` 安检，越界直接拒绝
 - `store`：会话仅在首条消息时落库，标题取首条消息前 60 字
 
@@ -79,11 +79,12 @@ MeoClaw是一个本地桌面的 AI 助理：支持纯对话、工作区文件任
 | React + TypeScript | 18 / 5 | 渲染层 | 事件流驱动的组件化 UI |
 | Vite | ≥ 5 | 开发服务器与构建 | 秒级热更新，`base:"./"` 支持 file:// 加载 |
 | FastAPI + uvicorn | ≥ 0.115 / 0.30 | 桥接 REST/WS | 与后端同语言零转换，自动文档 |
-| websockets | ≥ 12 | 事件流传输 | 单向推送即可，断线即任务结束 |
-| langchain-openai / core | ≥ 0.2 / ≥ 0.3 | 模型接入与工具协议 | OpenAI 兼容网关换供应商零改动 |
+| websockets | ≥ 12 | 事件流传输 | 原生 LangChain 事件经 Bridge 映射为稳定 UI 协议 |
+| LangChain | ≥ 1.4 | `create_agent`、middleware、工具协议 | 统一循环预算、错误、摘要和 HITL |
+| LangGraph + SQLite checkpoint | ≥ 1.2 / ≥ 3.1 | 状态图与持久化恢复 | 会话消息跨任务连续，审批可恢复 |
 | keyring | ≥ 25 | API Key 存 Windows 凭据管理器 | 失败自动降级本地 `.secrets.json` |
 | pyperclip / Pillow | — | 剪贴板与截图系统工具 | 桌面场景刚需 |
-| meoclaw（`src/`） | — | 后端工作流编排 | 复用 langgraph 状态图与统一事件流 |
+| meoclaw（`src/`） | — | 后端工作流编排 | 外层角色图 + 内层 `create_agent` |
 
 ## 依赖关系
 
@@ -93,7 +94,7 @@ desktop(渲染层) ──HTTP/WS──▶ bridge(8931) ──pip -e──▶ meo
                                 ▼                        ▼
                     %APPDATA%\MeoClawDesktop        OpenAI 兼容 API
                     settings.json / store.db /      (.env 或设置页供应商)
-                    sessions\<sid>\ 工作区
+                    checkpoints.sqlite / sessions\<sid>\
 ```
 
 - 前端不接触任何后端逻辑与密钥，仅访问本机 8931
@@ -105,9 +106,13 @@ desktop(渲染层) ──HTTP/WS──▶ bridge(8931) ──pip -e──▶ meo
 # 1) 后端核心 + Python 依赖（建议独立 venv，如 pyruntime）
 git clone https://github.com/Iivresse1/MeoClaw.git meoclaw
 cd meoclaw
-python -m venv ..\pyruntime
-..\pyruntime\Scripts\python.exe -m pip install -e ".[dev]"
-..\pyruntime\Scripts\python.exe -m pip install -r requirements.txt
+python -m venv pyruntime
+pyruntime\Scripts\python.exe -m pip install -e ".[dev]"
+pyruntime\Scripts\python.exe -m pip install -r requirements.txt
+
+# 先安装并启动 Docker Desktop（Windows 使用 WSL2 后端）
+# 构建工作区 shell 的 Docker 沙箱镜像
+.\scripts\build-sandbox.ps1
 
 # 2) 前端依赖
 cd desktop
@@ -136,21 +141,34 @@ npm run build; npm start    # 生产模式（加载 dist）
 | `providers` / `active_provider` | `[]` / `""` | 供应商列表与当前项 |
 | `sidebar_open` | `true` | 侧边栏开合状态 |
 
+运行环境变量：
+
+| 变量 | 默认 | 说明 |
+| --- | --- | --- |
+| `MEOCLAW_SANDBOX` | `docker` | workspace shell 隔离模式；生产不建议使用 `host` |
+| `MEOCLAW_SANDBOX_IMAGE` | `meoclaw-sandbox:latest` | 沙箱镜像 |
+| `MEOCLAW_SANDBOX_NETWORK` | `0` | 设为 `1` 才允许容器联网 |
+| `MEOCLAW_ALLOWED_ORIGINS` | 本地 Vite/Electron | REST CORS 白名单 |
+
 ## 权限模式
 
 | 下拉文案 | 内部值 | 行为 |
 | --- | --- | --- |
 | 仅对话 | `chat` | 直连模型流式对话，携带会话历史 |
-| 在工作区内修改 | `workspace`（默认） | planner→actor→verifier→final 完整工作流，文件操作限于会话工作区 |
-| 系统工具（需批准） | `system` | ReAct 循环 + 5 个系统工具，高危操作弹审批卡（120 秒未处理视为拒绝） |
+| 在工作区内修改 | `workspace`（默认） | planner→implementation→verifier→final；shell 在 Docker 中执行，Docker 不可用时 fail-closed |
+| 系统工具（需批准） | `system` | `create_agent` + 5 个系统工具；敏感调用经 `HumanInTheLoopMiddleware` 中断，用户决定后恢复 |
 
 ## 测试
 
 - 后端核心全链路回归（假模型、无需 API Key）：仓库根目录运行 `python -m pytest`
-- 桌面端冒烟：`GET /api/health` 探活 → 发送一条「仅对话」消息验证事件流与消息落库 →
-  `system` 档触发审批卡验证允许/拒绝链路
+- 桥接层安全测试：鉴权、Origin、session 路径和删除边界
+- 桌面端构建：`cd desktop; npm install; npm run build`
 
 ---
+
+新的运行架构、ContextBuilder、middleware、SQLite 恢复和 Docker 安全边界见
+[ARCHITECTURE_V1.1.md](ARCHITECTURE_V1.1.md)。`项目架构指南.md` 记录的是 1.0
+后端历史设计，不再代表当前执行路径。
 
 > 仓库分支说明：**`main`** 为完整项目（后端核心 `src/` + 桥接层 `bridge/` + 桌面端 `desktop/`）；
 > **`branch`** 为后端核心 `meoclaw` 的备份分支。

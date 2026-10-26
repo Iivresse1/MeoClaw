@@ -209,7 +209,9 @@ def test_run_search_agent_accepts_runtime_state_directly(
     result = run_search_agent(runtime, "看看情况", model=model)
 
     assert result["ok"] is True
-    assert "## Research instruction from planner" in model.calls[0][1].content
+    assert "## Role instruction" in "\n".join(
+        str(message.content) for message in model.calls[0]
+    )
 
 
 @pytest.mark.parametrize("instruction", ["", "   ", None])

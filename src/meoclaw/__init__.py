@@ -6,7 +6,7 @@
 from meoclaw.core.paths import WorkspaceError, resolve_in_workspace, resolve_workspace
 from meoclaw.core.state import RuntimeState
 
-__version__ = "0.1.0"
+__version__ = "1.1.0"
 
 __all__ = [
     "RuntimeState",
