@@ -4,28 +4,8 @@ import type { MsgRow, Session } from "./api";
 import Sidebar from "./components/Sidebar";
 import ChatView from "./components/ChatView";
 import SettingsModal from "./components/SettingsModal";
-
-export interface ChatMsg {
-  role: "user" | "assistant";
-  content: string;
-}
-
-export interface Step {
-  kind: string;
-  text: string;
-}
-
-export interface PendingApproval {
-  id: string;
-  tool: string;
-  detail: string;
-}
-
-export const MODE_LABELS: Record<string, string> = {
-  chat: "仅对话",
-  workspace: "在工作区内修改",
-  system: "系统工具（需批准）",
-};
+import type { Artifact, ChatMsg, PendingApproval, Step, StepStatus } from "./types";
+import { MODE_LABELS } from "./types";
 
 interface TaskEvent {
   type: string;
@@ -41,11 +21,22 @@ interface TaskEvent {
   passed?: boolean;
   checks?: unknown[];
   results?: unknown[];
+  args?: Record<string, unknown>;
+  ok?: boolean;
+  result?: unknown;
 }
 
 function truncate(s: string, n = 90): string {
   s = (s || "").replace(/\s+/g, " ").trim();
   return s.length > n ? s.slice(0, n) + "…" : s;
+}
+
+function detailText(value: unknown, limit = 1200): string {
+  const text =
+    typeof value === "string"
+      ? value
+      : JSON.stringify(value, null, 2) ?? String(value ?? "");
+  return text.length > limit ? `${text.slice(0, limit)}…` : text;
 }
 
 export default function App() {
@@ -60,7 +51,48 @@ export default function App() {
   const [mode, setMode] = useState("workspace");
   const [sidebarOpen, setSidebarOpen] = useState(true);
   const [settingsOpen, setSettingsOpen] = useState(false);
+  const [artifacts, setArtifacts] = useState<Artifact[]>([]);
+  const [durationMs, setDurationMs] = useState<number | null>(null);
   const streamRef = useRef("");
+  const stepIdRef = useRef(0);
+  const runStartedRef = useRef<number | null>(null);
+
+  function addStep(
+    kind: string,
+    text: string,
+    status: StepStatus = "info",
+    detail?: string
+  ) {
+    stepIdRef.current += 1;
+    const step: Step = {
+      id: `step-${stepIdRef.current}`,
+      kind,
+      text,
+      status,
+      detail,
+    };
+    setSteps((current) => [...current, step]);
+  }
+
+  function rememberArtifact(pathValue: unknown, operation: Artifact["operation"]) {
+    const path = typeof pathValue === "string" ? pathValue.trim() : "";
+    if (!path) return;
+    setArtifacts((current) => {
+      const existing = current.findIndex((item) => item.path === path);
+      if (existing >= 0) {
+        const next = [...current];
+        next[existing] = {
+          path,
+          operation:
+            next[existing].operation === "created" || operation === "created"
+              ? "created"
+              : "modified",
+        };
+        return next;
+      }
+      return [...current, { path, operation }];
+    });
+  }
 
   const refreshSessions = useCallback(
     () => api.sessions().then(setSessions).catch(() => {}),
@@ -99,6 +131,8 @@ export default function App() {
     if (running) return;
     setSid(s.id);
     setSteps([]);
+    setArtifacts([]);
+    setDurationMs(null);
     setStream("");
     setError("");
     try {
@@ -118,6 +152,8 @@ export default function App() {
     setSid(null);
     setMessages([]);
     setSteps([]);
+    setArtifacts([]);
+    setDurationMs(null);
     setStream("");
     setError("");
   }
@@ -130,6 +166,10 @@ export default function App() {
     streamRef.current = "";
     setStream("");
     setRunning(false);
+    if (runStartedRef.current !== null) {
+      setDurationMs(Date.now() - runStartedRef.current);
+      runStartedRef.current = null;
+    }
     refreshSessions();
   }
 
@@ -141,34 +181,72 @@ export default function App() {
         break;
       }
       case "node_start":
-        setSteps((s) => [...s, { kind: "节点", text: ev.node || ev.name || "" }]);
+        addStep("阶段", ev.node || ev.name || "开始处理", "running");
         break;
       case "plan":
-        setSteps((s) => [
-          ...s,
-          { kind: "计划", text: truncate(ev.plan_summary || ev.content || "") },
-        ]);
+        addStep(
+          "计划",
+          truncate(ev.plan_summary || ev.content || "已生成执行计划", 80),
+          "success",
+          detailText(ev.checks ?? ev.results ?? undefined)
+        );
         break;
-      case "tool_call":
-        setSteps((s) => [...s, { kind: "工具", text: ev.name || ev.tool || "" }]);
+      case "tool_call": {
+        const name = ev.name || ev.tool || "工具";
+        if (name === "FileWriteTool" || name === "FileEditTool") {
+          rememberArtifact(
+            ev.args?.file_path,
+            name === "FileWriteTool" ? "created" : "modified"
+          );
+        }
+        addStep(
+          "工具",
+          name,
+          "running",
+          ev.args && Object.keys(ev.args).length ? detailText(ev.args) : undefined
+        );
         break;
-      case "tool_result":
-        setSteps((s) => [...s, { kind: "结果", text: truncate(ev.content || "") }]);
+      }
+      case "tool_result": {
+        const result = ev.result ?? ev.content ?? "工具执行完成";
+        setSteps((current) => {
+          const next = [...current];
+          const index = [...next]
+            .reverse()
+            .findIndex((step) => step.kind === "工具" && step.status === "running");
+          if (index < 0) return current;
+          const target = next.length - 1 - index;
+          next[target] = {
+            ...next[target],
+            status: ev.ok === false ? "error" : "success",
+            detail: detailText(result),
+          };
+          return next;
+        });
         break;
+      }
       case "verification_command":
-        setSteps((s) => [...s, { kind: "校验命令", text: truncate(ev.command || ev.content || "") }]);
+        addStep(
+          "验收命令",
+          truncate(ev.command || ev.content || "运行验收命令", 120),
+          ev.ok === false ? "error" : "success",
+          ev.results ? detailText(ev.results) : undefined
+        );
         break;
       case "verification":
-        setSteps((s) => [
-          ...s,
-          {
-            kind: "校验",
-            text: `${ev.passed ? "通过" : "未通过"} · ${(ev.checks || []).length} 项检查`,
-          },
-        ]);
+        addStep(
+          "验收结论",
+          ev.passed ? "全部检查通过" : "存在未通过项",
+          ev.passed ? "success" : "error",
+          ev.checks ? detailText(ev.checks) : undefined
+        );
         break;
       case "react_done":
-        setSteps((s) => [...s, { kind: "回合完成", text: truncate(ev.content || "") }]);
+        addStep(
+          "阶段完成",
+          truncate(ev.content || "Agent 回合完成", 90),
+          "success"
+        );
         break;
       case "final_answer": {
         const c = ev.content || "";
@@ -179,13 +257,18 @@ export default function App() {
         break;
       }
       case "workflow_end":
-        setSteps((s) => [...s, { kind: "结束", text: "" }]);
+        addStep(
+          "任务结束",
+          ev.passed === false ? "任务未通过验收" : "任务已完成",
+          ev.passed === false ? "error" : "success"
+        );
         break;
       case "approval_request":
         if (ev.id) setApproval({ id: ev.id, tool: ev.tool || "", detail: ev.detail || "" });
         break;
       case "error":
         setError(ev.message || "运行出错");
+        addStep("错误", ev.message || "运行出错", "error");
         break;
       case "ui_done":
         finishRun();
@@ -198,8 +281,12 @@ export default function App() {
     if (!task || running) return;
     setError("");
     setSteps([]);
+    setArtifacts([]);
+    setDurationMs(null);
     setStream("");
     streamRef.current = "";
+    stepIdRef.current = 0;
+    runStartedRef.current = Date.now();
     setMessages((m) => [...m, { role: "user", content: task }]);
     setRunning(true);
     api
@@ -261,8 +348,10 @@ export default function App() {
         <ChatView
           messages={messages}
           steps={steps}
+          artifacts={artifacts}
           stream={stream}
           running={running}
+          durationMs={durationMs}
           approval={approval}
           error={error}
           mode={mode}

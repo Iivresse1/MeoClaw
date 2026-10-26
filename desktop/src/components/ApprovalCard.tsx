@@ -1,4 +1,4 @@
-import type { PendingApproval } from "../App";
+import type { PendingApproval } from "../types";
 
 interface Props {
   approval: PendingApproval;
