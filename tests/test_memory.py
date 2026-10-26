@@ -10,14 +10,13 @@ import pytest
 
 from meoclaw.core.state import RuntimeState
 from meoclaw.graph.memory import (
-    COMPRESSION_EVENT_KEEP,
     HANDOFF_FIELD_LIMIT,
     HANDOFF_KEEP,
     HISTORY_LIMIT,
     HISTORY_SUMMARY_FILENAME,
     LAST_ERROR_LIMIT,
-    NOTES_LIMIT,
     NOTEPAD_LIMIT,
+    NOTES_LIMIT,
     RULES_LAYER,
     _compact_sources,
     _short_text,
@@ -67,7 +66,7 @@ def test_short_text() -> None:
 
 def test_trim_handoffs_keeps_last_six() -> None:
     handoffs = [
-        {"from_agent": "planner", "to_agent": f"codeAgent", "instruction": f"任务{i}", "result": "ok"}
+        {"from_agent": "planner", "to_agent": "codeAgent", "instruction": f"任务{i}", "result": "ok"}
         for i in range(8)
     ]
 
@@ -190,7 +189,6 @@ def test_build_layered_memory_structure(state: dict[str, Any]) -> None:
     assert store["notepad_path"] == NOTEPAD_FILENAME
     assert store["notepad_exists"] is False
     assert store["todo_path"] == TODO_FILENAME
-    assert store["compression_events"] == []
 
 
 def test_build_layered_memory_clips_long_fields(state: dict[str, Any]) -> None:
@@ -223,17 +221,6 @@ def test_build_layered_memory_includes_notepad_and_history(
     assert "上一轮把 add 写错了" in store["history_summary"]
 
 
-def test_history_summary_prefers_state_value(state: dict[str, Any], runtime: RuntimeState) -> None:
-    append_history_summary(runtime, "文件里的旧历史")
-    state["history_summary"] = "图状态里的新历史"
-
-    store = build_layered_memory(state)["history_summary_store"]
-
-    assert "图状态里的新历史" in store["history_summary"]
-    assert "文件里的旧历史" not in store["history_summary"]
-    assert store["history_exists"] is True  # 文件确实存在（只是内容被状态覆盖）
-
-
 def test_history_summary_is_clipped(state: dict[str, Any], runtime: RuntimeState) -> None:
     append_history_summary(runtime, "h" * 6000)
 
@@ -241,15 +228,6 @@ def test_history_summary_is_clipped(state: dict[str, Any], runtime: RuntimeState
 
     assert len(store["history_summary"]) <= HISTORY_LIMIT
     assert len(store["notepad"]) <= NOTEPAD_LIMIT
-
-
-def test_compression_events_keep_last_three(state: dict[str, Any]) -> None:
-    state["compression_events"] = [{"node": f"n{i}"} for i in range(5)]
-
-    store = build_layered_memory(state)["history_summary_store"]
-
-    assert [event["node"] for event in store["compression_events"]] == ["n2", "n3", "n4"]
-    assert COMPRESSION_EVENT_KEEP == 3
 
 
 def test_session_fields_come_from_runtime_metadata(

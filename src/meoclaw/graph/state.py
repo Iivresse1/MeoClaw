@@ -9,7 +9,7 @@
   保持注解是真实对象最稳妥。Python >= 3.10 因此 `int | None` 可以直接用。
 """
 
-from typing import Annotated, Any, TypedDict
+from typing import Annotated, TypedDict
 
 from langchain_core.messages import BaseMessage
 from langgraph.graph.message import add_messages
@@ -18,8 +18,6 @@ from meoclaw.core.state import RuntimeState
 
 __all__ = [
     "AgentHandoff",
-    "CompressionEvent",
-    "LayeredMemory",
     "MeoGraphState",
     "SourceItem",
     "TodoItem",
@@ -75,25 +73,6 @@ class AgentHandoff(TypedDict, total=False):
     result: str
 
 
-class CompressionEvent(TypedDict, total=False):
-    """一次上下文压缩的记录（供审计"什么时候压的、压掉了多少"）。"""
-
-    at: str
-    node: str
-    tokens_before: int
-    tokens_after: int
-    dropped_messages: int
-    summary: str
-
-
-class LayeredMemory(TypedDict, total=False):
-    """三层记忆快照，由 `graph/memory.py` 的 `build_layered_memory()` 组装。"""
-
-    rules: dict[str, Any]
-    working_memory: dict[str, Any]
-    history_summary_store: dict[str, Any]
-
-
 class MeoGraphState(TypedDict, total=False):
     """整张图共享的状态。
 
@@ -119,14 +98,6 @@ class MeoGraphState(TypedDict, total=False):
         agent_handoffs: 委派给专家 Agent 的交接记录（记忆里只留最近几条）。
         code_agent_summary: codeAgent 本轮的收尾总结。
         verifier_summary: verifier 的结论摘要。
-        history_summary: 压缩历史摘要（HISTORY_SUMMARY.md 的图内副本）。
-        context_summary: 当前上下文的压缩摘要。
-        context_token_count: 估算的上下文 token 数。
-        context_token_limit: 触发压缩的 token 上限。
-        context_should_compress: 是否建议压缩（由上下文工程节点判定）。
-        context_next_node: 压缩后建议去的下一个节点。
-        compression_events: 历次压缩记录（记忆里只带最近 3 条）。
-        memory_snapshot: 最近一次组装出的三层记忆快照。
     """
 
     task: str
@@ -151,12 +122,3 @@ class MeoGraphState(TypedDict, total=False):
     agent_handoffs: list[AgentHandoff]
     code_agent_summary: str
     verifier_summary: str
-    # --- 上下文工程 / 三层记忆 ---
-    history_summary: str
-    context_summary: str
-    context_token_count: int
-    context_token_limit: int
-    context_should_compress: bool
-    context_next_node: str
-    compression_events: list[CompressionEvent]
-    memory_snapshot: LayeredMemory

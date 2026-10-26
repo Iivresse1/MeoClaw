@@ -52,27 +52,13 @@ def test_state_is_total_false() -> None:
             "agent_handoffs",
             "code_agent_summary",
             "verifier_summary",
-            # 上下文工程 / 三层记忆
-            "history_summary",
-            "context_summary",
-            "context_token_count",
-            "context_token_limit",
-            "context_should_compress",
-            "context_next_node",
-            "compression_events",
-            "memory_snapshot",
         }
     )
 
 
 def test_memory_related_types_exist() -> None:
-    """三层记忆/上下文工程用到的类型都能导入（LangGraph 会按注解建 channel）。"""
-    from meoclaw.graph.state import (
-        AgentHandoff,
-        CompressionEvent,
-        LayeredMemory,
-        SourceItem,
-    )
+    """三层记忆用到的结构化类型都能导入。"""
+    from meoclaw.graph.state import AgentHandoff, SourceItem
 
     assert set(AgentHandoff.__optional_keys__) == {
         "from_agent",
@@ -80,20 +66,7 @@ def test_memory_related_types_exist() -> None:
         "instruction",
         "result",
     }
-    assert set(CompressionEvent.__optional_keys__) == {
-        "at",
-        "node",
-        "tokens_before",
-        "tokens_after",
-        "dropped_messages",
-        "summary",
-    }
     assert set(SourceItem.__optional_keys__) == {"title", "url", "snippet"}
-    assert set(LayeredMemory.__optional_keys__) == {
-        "rules",
-        "working_memory",
-        "history_summary_store",
-    }
 
 
 def test_todo_item_and_verification_result_keys() -> None:

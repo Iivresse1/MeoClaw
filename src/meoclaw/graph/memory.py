@@ -14,7 +14,7 @@
 | --- | --- | --- |
 | Rules | 固定规则（工作区范围、路径写法、文件分工、不给 Agent 写记忆的工具） | 永远不变 |
 | Working | 当前任务状态：任务/计划/待办/验收标准/最近失败/轮数/检索要点/交接记录 | 每轮刷新 |
-| History Summary | 压缩历史：`HISTORY_SUMMARY.md`、`NOTEPAD.md`、`context_summary`、最近 3 次压缩事件 | 跨压缩保留 |
+| History Summary | 压缩历史与长期笔记：`HISTORY_SUMMARY.md`、`NOTEPAD.md` | 跨任务保留 |
 """
 
 from __future__ import annotations
@@ -64,12 +64,9 @@ AGENT_SUMMARY_LIMIT = 1000
 LAST_ERROR_LIMIT = 1400
 HISTORY_LIMIT = 2200
 NOTEPAD_LIMIT = 1800
-CONTEXT_SUMMARY_LIMIT = 1600
 #: 交接记录只保留最近几条；每条字段再压到这个长度
 HANDOFF_KEEP = 6
 HANDOFF_FIELD_LIMIT = 600
-#: 压缩事件只带最近几条
-COMPRESSION_EVENT_KEEP = 3
 
 
 # --------------------------------------------------------------------------- #
@@ -260,8 +257,7 @@ def build_layered_memory(
         "max_attempts": _as_int(view.get("max_attempts"), 3) or 3,
     }
 
-    # 图状态里的 history_summary 优先（压缩节点刚写的最新值），否则用文件内容
-    history_text = view.get("history_summary") or history.get("content", "")
+    history_text = history.get("content", "")
     history_summary_store: dict[str, Any] = {
         "history_path": HISTORY_SUMMARY_FILENAME,
         "history_exists": bool(history.get("exists", False)),
@@ -269,12 +265,6 @@ def build_layered_memory(
         "notepad_path": NOTEPAD_FILENAME,
         "notepad_exists": bool(notepad.get("exists", False)),
         "notepad": _short_text(notepad.get("content", ""), NOTEPAD_LIMIT),
-        "context_summary": _short_text(
-            view.get("context_summary", ""), CONTEXT_SUMMARY_LIMIT
-        ),
-        "compression_events": list(view.get("compression_events") or [])[
-            -COMPRESSION_EVENT_KEEP:
-        ],
         "todo_path": TODO_FILENAME,
     }
 

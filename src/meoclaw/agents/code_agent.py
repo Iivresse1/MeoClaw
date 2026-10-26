@@ -199,6 +199,7 @@ def run_code_agent(
         task_id=task_id,
         extra_middleware=extra_middleware,
         message_sink=messages,
+        stream_tokens=True,
     ):
         tagged = {**event, "agent": CODE_AGENT_NAME}
         tool_events.append(tagged)

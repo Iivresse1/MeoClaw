@@ -18,6 +18,7 @@ from langchain.agents.middleware import AgentMiddleware
 from langchain_core.language_models import BaseChatModel
 from langchain_core.messages import (
     AIMessage,
+    AIMessageChunk,
     BaseMessage,
     HumanMessage,
     ToolMessage,
@@ -36,13 +37,13 @@ from meoclaw.tools.registry import build_tools
 __all__ = [
     "ACTOR_PROMPT",
     "REACT_EVENT_TYPES",
-    "execute_tool",
     "message_text",
     "serialize_tool_result",
     "stream_react_events",
 ]
 
 REACT_EVENT_TYPES: tuple[str, ...] = (
+    "ai_token",
     "ai_message",
     "tool_call",
     "tool_result",
@@ -71,30 +72,6 @@ def serialize_tool_result(result: Any) -> str:
         return json.dumps(result, ensure_ascii=False, default=str)
     except (TypeError, ValueError):  # pragma: no cover - default=str is enough
         return json.dumps(str(result), ensure_ascii=False)
-
-
-def execute_tool(
-    tool_map: Mapping[str, Any],
-    call: Mapping[str, Any],
-) -> tuple[bool, Any]:
-    """Compatibility helper retained for callers/tests.
-
-    Production agent execution now happens inside LangChain's ToolNode, which is
-    guarded by ``ToolErrorMiddleware`` and ``ToolCallLimitMiddleware``.
-    """
-    if not isinstance(call, Mapping):
-        return False, f"非法的 tool_call 结构：{call!r}"
-    name = str(call.get("name") or "")
-    args = call.get("args") or {}
-    tool = tool_map.get(name)
-    if tool is None:
-        return False, f"未知工具 {name!r}；可用工具：{', '.join(tool_map)}"
-    try:
-        return True, tool.invoke(args)
-    except KeyboardInterrupt:  # pragma: no cover
-        raise
-    except Exception as exc:
-        return False, f"工具执行失败：{type(exc).__name__}: {exc}"
 
 
 class _DuckChatModel(BaseChatModel):
@@ -174,6 +151,7 @@ def stream_react_events(
     extra_middleware: Sequence[AgentMiddleware] | None = None,
     summary_token_limit: int = 80_000,
     resume: Any = None,
+    stream_tokens: bool = False,
 ) -> Iterator[dict[str, Any]]:
     """Run a create_agent graph and translate its native stream to events."""
     if not isinstance(task, str) or not task.strip():
@@ -236,14 +214,38 @@ def stream_react_events(
     pending_calls: list[dict[str, Any]] = []
 
     stream_input: Any = Command(resume=resume) if resume is not None else {"messages": initial}
+    stream_mode: str | list[str] = (
+        ["updates", "messages"] if stream_tokens else "updates"
+    )
     for chunk in agent.stream(
         stream_input,
         config=config,
-        stream_mode="updates",
+        stream_mode=stream_mode,
     ):
-        if not isinstance(chunk, Mapping):
+        if isinstance(chunk, tuple) and len(chunk) == 2 and chunk[0] in {
+            "updates",
+            "messages",
+        }:
+            mode, payload = chunk
+        else:
+            mode, payload = "updates", chunk
+        if mode == "messages":
+            if role != "verifier" and isinstance(payload, tuple) and payload:
+                message = payload[0]
+                if isinstance(message, (AIMessage, AIMessageChunk)):
+                    text = message_text(message.content)
+                    if text:
+                        yield {
+                            "type": "ai_token",
+                            "content": text,
+                            "loop": loops,
+                        }
             continue
-        interrupts = chunk.get("__interrupt__")
+
+        if not isinstance(payload, Mapping):
+            continue
+        update = payload
+        interrupts = update.get("__interrupt__")
         if interrupts:
             for item in interrupts:
                 value = getattr(item, "value", {}) or {}
@@ -277,7 +279,7 @@ def stream_react_events(
                 }
             paused = True
             break
-        update = chunk.get("model")
+        update = payload.get("model")
         if isinstance(update, Mapping):
             for message in update.get("messages") or []:
                 if not isinstance(message, AIMessage):
@@ -314,7 +316,7 @@ def stream_react_events(
                 if message_sink is not None:
                     message_sink.append(tagged)
 
-        update = chunk.get("tools")
+        update = payload.get("tools")
         if isinstance(update, Mapping):
             for message in update.get("messages") or []:
                 if not isinstance(message, ToolMessage):

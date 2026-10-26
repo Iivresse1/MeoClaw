@@ -46,16 +46,12 @@ NODE_EMOJI = {
     "planner": "📋",
     "actor": "🔧",
     "verifier": "✅",
-    "context_monitor": "📊",
-    "context_compressor": "📦",
     "final": "📝",
 }
 NODE_TITLES = {
     "planner": "Planner",
     "actor": "Actor",
     "verifier": "Verifier",
-    "context_monitor": "ContextMonitor",
-    "context_compressor": "Compressor",
     "final": "Final",
 }
 
@@ -129,7 +125,7 @@ def _print_tools(tools: Sequence[StructuredTool]) -> None:
             continue
         try:
             fields = schema.model_json_schema()
-        except Exception:  # pragma: no cover - 理论上不会失败
+        except Exception:  # noqa: BLE001, S112 - optional schema introspection
             continue
         required = set(fields.get("required", []))
         for field_name, field in fields.get("properties", {}).items():
@@ -214,28 +210,6 @@ def _stream_events(
                     f"exit_code={event.get('exit_code')} {event.get('command')}", style="dim"
                 )
                 console.print(line)
-
-            elif kind == "context_usage":
-                line = Text("  ")
-                line.append("[CTX] ", style="magenta")
-                line.append(
-                    f"token ≈ {event.get('token_count')} / 上限 {event.get('token_limit')}"
-                    + ("（需要压缩）" if event.get("should_compress") else ""),
-                    style="dim",
-                )
-                console.print(line)
-
-            elif kind == "context_compressed":
-                line = Text("  ")
-                line.append("[ZIP] ", style="magenta")
-                line.append(
-                    f"上下文 {event.get('tokens_before')} → {event.get('tokens_after')} tokens"
-                    f"，丢弃 {event.get('dropped_messages')} 条消息"
-                    + ("（LLM 摘要）" if event.get("used_llm") else "（确定性兜底摘要）"),
-                    style="dim",
-                )
-                console.print(line)
-                status.update("[bold blue]MeoClaw 正在工作…[/bold blue]")
 
             elif kind == "plan":
                 body: list[str] = [str(event.get("plan_summary") or "").strip()]
@@ -359,7 +333,7 @@ def _run_agent(
         return 3
     except KeyboardInterrupt:  # pragma: no cover - 用户 Ctrl+C
         raise
-    except Exception as exc:
+    except Exception as exc:  # noqa: BLE001 - CLI boundary reports model/network failures
         # 例如 OPENAI_BASE_URL 非法、网络失败、模型返回异常结构等
         console.print(Text(f"运行失败：{type(exc).__name__}: {exc}", style="red"))
         return 4

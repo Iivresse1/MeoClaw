@@ -27,20 +27,17 @@ langgraph 的节点包装器用 `inspect.signature(...).parameters[...].annotati
 import json
 import re
 from collections.abc import Mapping, Sequence
-from datetime import datetime
 from typing import Any
 
 from langchain_core.messages import (
     AIMessage,
     BaseMessage,
     HumanMessage,
-    RemoveMessage,
     SystemMessage,
     ToolMessage,
 )
 from langchain_core.runnables import RunnableConfig
 from langchain_core.tools import StructuredTool, ToolException
-from langgraph.graph.message import REMOVE_ALL_MESSAGES
 
 from meoclaw.agents.code_agent import CODE_AGENT_NAME, run_code_agent
 from meoclaw.agents.search_agent import SEARCH_AGENT_NAME, run_search_agent
@@ -53,17 +50,9 @@ from meoclaw.core.react import (
 )
 from meoclaw.core.sandbox import build_sandbox_shell_middleware, sandbox_mode
 from meoclaw.core.state import RuntimeState
-from meoclaw.graph.memory import (
-    append_history_summary,
-    build_layered_memory,
-    format_layered_memory_for_prompt,
-    short_text,
-    trim_handoffs,
-)
 from meoclaw.graph.state import MeoGraphState
 from meoclaw.prompts import (
     ACTOR_PROMPT,
-    CONTEXT_COMPRESSION_PROMPT,
     FINAL_PROMPT,
     PLANNER_PROMPT,
     SUPERVISOR_PROMPT,
@@ -87,10 +76,7 @@ _CONTEXT_BUILDER = ContextBuilder()
 __all__ = [
     "CALL_CODE_AGENT_TOOL",
     "CALL_SEARCH_AGENT_TOOL",
-    "CONTEXT_COMPRESSOR_NODE",
-    "DEFAULT_CONTEXT_TOKEN_LIMIT",
     "DEFAULT_MAX_ATTEMPTS",
-    "DEFAULT_NEXT_NODE",
     "FINAL",
     "MAX_ACTOR_LOOPS",
     "MAX_SUPERVISOR_LOOPS",
@@ -98,14 +84,7 @@ __all__ = [
     "PlannerError",
     "actor_node",
     "build_todo_update_tool",
-    "compose_actor_prompt",
     "compose_final_report",
-    "compose_supervisor_brief",
-    "compose_verifier_brief",
-    "context_compressor_node",
-    "context_monitor_node",
-    "context_monitor_route",
-    "estimate_context_tokens",
     "execute_supervisor_tool",
     "extract_json_object",
     "extract_plan",
@@ -135,12 +114,6 @@ MAX_VERIFIER_LOOPS = 6
 DEFAULT_MAX_ATTEMPTS = 3
 #: 路由终点的名字
 FINAL = "final"
-#: 上下文超过这个 token 数就要压缩
-DEFAULT_CONTEXT_TOKEN_LIMIT = 400_000
-#: `context_next_node` 的默认去向（拿不到上游设置时）
-DEFAULT_NEXT_NODE = "verifier"
-#: 压缩节点的名字（`context_monitor_route` 会返回它）
-CONTEXT_COMPRESSOR_NODE = "context_compressor"
 
 
 class PlannerError(RuntimeError):
@@ -240,25 +213,6 @@ def extract_plan(response: Any) -> dict[str, Any]:
     return normalize_plan(payload)
 
 
-def _planner_brief(state: Mapping[str, Any], task: str, *, revising: bool) -> str:
-    if not revising:
-        return f"Task:\n{task}\n\nCall TodoWriteTool with your plan."
-
-    payload = {
-        "task": task,
-        "previous_plan_summary": state.get("plan_summary", ""),
-        "previous_todos": state.get("todos", []),
-        "acceptance_criteria": state.get("acceptance_criteria", []),
-        "verification_failure": state.get("last_error", ""),
-        "recommended_next_instruction": state.get("next_instruction", ""),
-        "attempts": state.get("attempts", 0),
-    }
-    return (
-        "The previous attempt failed verification. Revise the plan and call "
-        "TodoWriteTool again.\n\n" + json.dumps(payload, ensure_ascii=False, indent=2)
-    )
-
-
 def planner_node(
     state: MeoGraphState,
     config: RunnableConfig | None = None,
@@ -315,10 +269,6 @@ def planner_node(
         "verification_commands": plan["verification_commands"],
         "max_attempts": int(state.get("max_attempts") or DEFAULT_MAX_ATTEMPTS),
         "passed": False,
-        # 规划完该去验证（supervisor 拓扑 planner → context_monitor → verifier）。
-        # 简单拓扑里 planner 后面还有 actor，但这个值会在 verifier 那里被覆盖，
-        # 不会被 context_monitor_route 读到。
-        "context_next_node": "verifier",
     }
 
 
@@ -347,37 +297,6 @@ def merge_sources(existing: Any, addition: Any) -> list[dict[str, str]]:
         seen.add(url)
         merged.append({"title": str(item.get("title") or url), "url": url})
     return merged
-
-
-def compose_supervisor_brief(
-    state: Mapping[str, Any],
-    task: str,
-    memory: Mapping[str, Any],
-) -> str:
-    """supervisor 的输入：任务 +（失败时的）修订上下文 + 三层记忆快照。"""
-    parts = [f"## Task\n{task}", f"Attempt: {int(state.get('attempts') or 0) + 1}"]
-
-    if state.get("todos") and str(state.get("last_error") or "").strip():
-        payload = {
-            "previous_plan_summary": state.get("plan_summary", ""),
-            "previous_todos": state.get("todos", []),
-            "verification_failure": state.get("last_error", ""),
-            "recommended_next_instruction": state.get("next_instruction", ""),
-            "attempts": state.get("attempts", 0),
-        }
-        parts.append(
-            "The previous attempt failed verification. Revise the plan and "
-            "delegate only the missing fix.\n"
-            + json.dumps(payload, ensure_ascii=False, indent=2)
-        )
-
-    parts.append("## Memory snapshot\n" + format_layered_memory_for_prompt(memory))
-    parts.append(
-        "Call TodoWriteTool with your plan first, then delegate research via "
-        "CallSearchAgentTool and implementation via CallCodeAgentTool as needed. "
-        "Finish with a concise supervisor summary."
-    )
-    return "\n\n".join(parts)
 
 
 def _build_supervisor_tools(
@@ -668,55 +587,12 @@ def supervisor_node(
             or working.get("last_actor_summary")
             or summary
         ),
-        "context_next_node": "verifier",
     }
 
 
 # --------------------------------------------------------------------------- #
 # actor
 # --------------------------------------------------------------------------- #
-def compose_actor_prompt(state: Mapping[str, Any]) -> str:
-    """ACTOR_PROMPT + 当前计划 + 验收标准 + 上一轮失败原因。"""
-    sections: list[str] = [ACTOR_PROMPT.rstrip()]
-
-    plan_summary = str(state.get("plan_summary") or "").strip()
-    if plan_summary:
-        sections.append(f"## Plan summary\n{plan_summary}")
-
-    todos = state.get("todos") or []
-    if todos:
-        lines = []
-        for todo in todos:
-            note = str(todo.get("note") or "").strip()
-            lines.append(
-                f"- [{todo.get('status', 'pending')}] {todo.get('id')}: "
-                f"{todo.get('content')}" + (f" (note: {note})" if note else "")
-            )
-        sections.append("## Todos\n" + "\n".join(lines))
-
-    criteria = state.get("acceptance_criteria") or []
-    if criteria:
-        sections.append(
-            "## Acceptance criteria\n" + "\n".join(f"- {item}" for item in criteria)
-        )
-
-    commands = state.get("verification_commands") or []
-    if commands:
-        sections.append(
-            "## Verification commands (the verifier will run these)\n"
-            + "\n".join(f"- {item}" for item in commands)
-        )
-
-    last_error = str(state.get("last_error") or "").strip()
-    if last_error:
-        sections.append(f"## Previous verification failure (fix this first)\n{last_error}")
-        instruction = str(state.get("next_instruction") or "").strip()
-        if instruction:
-            sections.append(f"## Verifier instruction\n{instruction}")
-
-    return "\n\n".join(sections)
-
-
 def actor_node(
     state: MeoGraphState,
     config: RunnableConfig | None = None,
@@ -763,6 +639,7 @@ def actor_node(
         task_id=task_id,
         extra_middleware=extra_middleware,
         message_sink=collected,
+        stream_tokens=True,
     ):
         if emit is not None:
             _forward_react_event(emit, "actor", event)
@@ -780,8 +657,6 @@ def actor_node(
         "messages": collected,
         "last_actor_summary": summary,
         "todos": todos,
-        # 执行完就该验证了（context_monitor 会把上下文路由到 verifier）
-        "context_next_node": "verifier",
     }
 
 
@@ -916,67 +791,6 @@ def _format_failure(
     return "\n".join(lines) or "验证未通过，但未给出具体原因"
 
 
-def compose_verifier_brief(
-    state: Mapping[str, Any],
-    command_results: Sequence[Mapping[str, Any]],
-) -> str:
-    """给 verifier 的输入：计划 + 验收标准 + 验证命令结果 + 最近 actor 输出。"""
-    sections: list[str] = []
-
-    task = str(state.get("task") or "").strip()
-    if task:
-        sections.append(f"## Task\n{task}")
-
-    plan_summary = str(state.get("plan_summary") or "").strip()
-    if plan_summary:
-        sections.append(f"## Plan summary\n{plan_summary}")
-
-    todos = state.get("todos") or []
-    if todos:
-        lines = [
-            f"- [{todo.get('status', 'pending')}] {todo.get('id')}: {todo.get('content')}"
-            for todo in todos
-        ]
-        sections.append("## Todos\n" + "\n".join(lines))
-
-    criteria = state.get("acceptance_criteria") or []
-    if criteria:
-        sections.append(
-            "## Acceptance criteria\n" + "\n".join(f"- {item}" for item in criteria)
-        )
-
-    commands = state.get("verification_commands") or []
-    if commands:
-        sections.append(
-            "## Verification commands\n" + "\n".join(f"- {item}" for item in commands)
-        )
-
-    if command_results:
-        lines = []
-        for result in command_results:
-            lines.append(
-                f"- `{result.get('command')}` → exit_code={result.get('exit_code')}, "
-                f"ok={bool(result.get('ok'))}"
-            )
-            output = str(result.get("stderr") or result.get("stdout") or "").strip()
-            if output:
-                lines.append(f"  output: {_clip(output, 600)}")
-        sections.append(
-            "## Verification command results (already executed by the runtime)\n"
-            + "\n".join(lines)
-        )
-    else:
-        sections.append(
-            "## Verification command results\n(no verification commands were configured)"
-        )
-
-    summary = str(state.get("last_actor_summary") or "").strip()
-    if summary:
-        sections.append(f"## Latest actor summary\n{summary}")
-
-    return "\n\n".join(sections)
-
-
 def verifier_node(
     state: MeoGraphState,
     config: RunnableConfig | None = None,
@@ -1042,8 +856,6 @@ def verifier_node(
     ]
 
     attempts = int(state.get("attempts") or 0) + 1
-    max_attempts = int(state.get("max_attempts") or DEFAULT_MAX_ATTEMPTS)
-    exhausted = attempts >= max_attempts
 
     todos = [dict(todo) for todo in (state.get("todos") or [])]
     updates: dict[str, Any] = {
@@ -1060,15 +872,8 @@ def verifier_node(
         for todo in todos:
             todo["status"] = "completed"
         updates["last_error"] = ""
-        updates["context_next_node"] = FINAL
     else:
         updates["last_error"] = _format_failure(verdict, failed_commands)
-        # 失败就回炉重新规划（context_monitor_route 在没通过时会把流程送去这里）。
-        # 注意：试满 max_attempts 时必须写 FINAL —— `verifier_route` 里有这个兜底，
-        # 但 `context_monitor_route` 没有（它只认 passed/压缩/context_next_node），
-        # 所以像 build_complex_workflow 那种"verifier → context_monitor"的拓扑，
-        # 靠这里的 FINAL 才能收敛，否则会 planner ↔ verifier 无限打转。
-        updates["context_next_node"] = FINAL if exhausted else "planner"
 
     return updates
 
@@ -1185,7 +990,7 @@ def final_node(
             text = message_text(getattr(response, "content", "")).strip()
             if text:
                 report = text
-        except Exception:  # noqa: BLE001 - 总结是尽力而为，失败就退回确定性文本
+        except Exception:  # noqa: BLE001, S110 - 总结失败时使用确定性文本
             pass
 
     task_id = str((runtime.metadata or {}).get("task_id") or "")
@@ -1196,409 +1001,3 @@ def final_node(
         visible_to=["planner", "actor", "verifier", "final"],
     )
     return {"final_answer": report, "passed": passed, "messages": [final_message]}
-
-
-# --------------------------------------------------------------------------- #
-# 上下文监控
-# --------------------------------------------------------------------------- #
-def estimate_context_tokens(
-    state: MeoGraphState,
-    config: RunnableConfig | None = None,
-    *,
-    memory_payload: BaseMessage | None = None,
-) -> int:
-    """估算"当前消息 + 记忆快照"的 token 数。
-
-    优先用模型自带的分词器（`get_num_tokens_from_messages`，ChatOpenAI 走 tiktoken）；
-    任何异常（没配 Key、模型不支持、分词器下载失败……）都退回 `len(text) // 4`，
-    因为这个值只用来决定"要不要压缩"，不值得让它把图跑挂。
-    """
-    messages: list[BaseMessage] = list(state.get("messages") or [])
-    if memory_payload is not None:
-        messages = [*messages, memory_payload]
-
-    try:
-        model = resolve_model(state, config)
-        return int(model.get_num_tokens_from_messages(messages))
-    except Exception:  # noqa: BLE001 - 见 docstring
-        text = "\n".join(message_text(getattr(item, "content", "")) for item in messages)
-        return len(text) // 4
-
-
-def context_monitor_node(
-    state: MeoGraphState,
-    config: RunnableConfig | None = None,
-) -> dict[str, Any]:
-    """监控上下文规模，决定"继续走"还是"先压缩"。
-
-    1. 用 `estimate_context_tokens()` 估算 `messages + 记忆快照` 的 token 数；
-    2. 与 `context_token_limit`（默认 400000）比较，得出 `context_should_compress`；
-    3. `context_next_node` 由上游节点设置（verifier 失败后是 `"planner"`），
-       拿不到就用默认 `"verifier"`。
-
-    Returns:
-        `context_token_count` / `context_should_compress` / `context_next_node`，
-        另外顺带写 `memory_snapshot`（RULES_LAYER 要求"记忆由运行时组装"，
-        这里就是组装点，图状态里因此总能拿到最近一份快照）。
-
-    注意：本节点已接进两种拓扑：`build_workflow()`（verifier 失败重试的分支）与
-    `build_complex_workflow()`（planner 之后、verifier 之后都会经过）。
-    """
-    emit = resolve_emit(config)
-    _emit_node_start(emit, "context_monitor")
-
-    memory = build_layered_memory(state, node="context_monitor")
-    memory_payload = SystemMessage(
-        content="[layered memory]\n" + format_layered_memory_for_prompt(memory)
-    )
-
-    token_count = estimate_context_tokens(state, config, memory_payload=memory_payload)
-    limit = int(state.get("context_token_limit") or DEFAULT_CONTEXT_TOKEN_LIMIT)
-    should_compress = token_count > limit
-
-    update: dict[str, Any] = {
-        "context_token_count": token_count,
-        "context_token_limit": limit,
-        "context_should_compress": should_compress,
-        "context_next_node": str(state.get("context_next_node") or DEFAULT_NEXT_NODE),
-        "memory_snapshot": memory,
-    }
-
-    if emit is not None:
-        emit(
-            {
-                "type": "context_usage",
-                "node": "context_monitor",
-                "token_count": token_count,
-                "token_limit": limit,
-                "should_compress": should_compress,
-                "next_node": update["context_next_node"],
-            }
-        )
-
-    return update
-
-
-def context_monitor_route(state: MeoGraphState) -> str:
-    """上下文监控后的路由：已通过就收尾，该压缩就压缩，否则回到上游指定的节点。"""
-    if state.get("passed"):
-        return FINAL
-    if state.get("context_should_compress"):
-        return CONTEXT_COMPRESSOR_NODE
-    return str(state.get("context_next_node") or DEFAULT_NEXT_NODE)
-
-
-# --------------------------------------------------------------------------- #
-# 上下文压缩
-# --------------------------------------------------------------------------- #
-#: 压缩摘要各字段的字符上限
-COMPRESSION_FIELD_LIMITS: dict[str, int] = {
-    "summary": 2200,
-    "active_goal": 600,
-    "completed_work": 1200,
-    "open_todos": 1200,
-    "important_files": 800,
-    "tool_findings": 1600,
-    "sources": 1200,
-    "next_steps": 1000,
-    "risks": 800,
-}
-#: 压缩后写回 `research_notes` 的上限
-COMPRESSED_NOTES_LIMIT = 1600
-#: 压缩后保留的 sources 条数
-MAX_COMPRESSED_SOURCES = 20
-#: 状态里最多保留多少条压缩事件（记忆层只带最近 3 条）
-MAX_COMPRESSION_EVENTS = 20
-#: 送进压缩提示词的转录预算
-TRANSCRIPT_PER_MESSAGE_CHARS = 1500
-TRANSCRIPT_TOTAL_CHARS = 24000
-
-#: 摘要里各段的展示顺序与标题
-_DIGEST_SECTIONS: tuple[tuple[str, str], ...] = (
-    ("active_goal", "Active goal"),
-    ("completed_work", "Completed work"),
-    ("open_todos", "Open todos"),
-    ("important_files", "Important files"),
-    ("tool_findings", "Tool findings"),
-    ("sources", "Sources"),
-    ("next_steps", "Next steps"),
-    ("risks", "Risks"),
-)
-
-
-def _safe_int(value: Any, default: int = 0) -> int:
-    try:
-        return int(value)
-    except (TypeError, ValueError):
-        return default
-
-
-def _as_text_block(value: Any) -> str:
-    """把字符串/列表/字典统一渲染成多行文本（todos、files、sources 都能吃）。"""
-    if value is None:
-        return ""
-    if isinstance(value, str):
-        return value.strip()
-    if isinstance(value, Mapping):
-        return "\n".join(f"- {key}: {item}" for key, item in value.items())
-    if isinstance(value, (list, tuple)):
-        lines: list[str] = []
-        for item in value:
-            if isinstance(item, Mapping):
-                head = " ".join(
-                    str(part)
-                    for part in (
-                        item.get("title") or item.get("name") or item.get("id") or "",
-                        item.get("url") or item.get("link") or "",
-                    )
-                    if part
-                )
-                detail = str(
-                    item.get("detail") or item.get("note") or item.get("content") or ""
-                ).strip()
-                lines.append(f"- {head or item}" + (f"：{detail}" if detail else ""))
-            else:
-                lines.append(f"- {item}")
-        return "\n".join(lines)
-    return str(value)
-
-
-def _render_transcript(
-    messages: Sequence[BaseMessage],
-    *,
-    per_message: int = TRANSCRIPT_PER_MESSAGE_CHARS,
-    total: int = TRANSCRIPT_TOTAL_CHARS,
-) -> str:
-    """把消息历史渲染成有界的纯文本，喂给压缩提示词。"""
-    lines = [
-        f"[{type(message).__name__}] "
-        f"{short_text(message_text(getattr(message, 'content', '')), per_message)}".rstrip()
-        for message in messages
-    ]
-    return short_text("\n".join(lines), total)
-
-
-def _render_compression_digest(digest: Mapping[str, Any]) -> str:
-    """把压缩 JSON 渲染成可读的续跑摘要（9 个字段一个不丢）。"""
-    parts: list[str] = []
-    summary = short_text(str(digest.get("summary") or ""), COMPRESSION_FIELD_LIMITS["summary"])
-    if summary:
-        parts.append(summary)
-
-    for key, title in _DIGEST_SECTIONS:
-        text = short_text(
-            _as_text_block(digest.get(key)), COMPRESSION_FIELD_LIMITS.get(key, 800)
-        )
-        if text:
-            parts.append(f"## {title}\n{text}")
-
-    return "\n\n".join(parts)
-
-
-def _coerce_sources(value: Any) -> list[dict[str, str]]:
-    """把压缩 JSON 里的 sources 规范成 `[{title, url}]`。"""
-    items = value if isinstance(value, (list, tuple)) else [value] if value else []
-    sources: list[dict[str, str]] = []
-    for item in items:
-        if isinstance(item, Mapping):
-            title = str(item.get("title") or item.get("name") or "").strip()
-            url = str(item.get("url") or item.get("link") or "").strip()
-        else:
-            title, url = short_text(str(item).strip(), 200), ""
-        if not title and not url:
-            continue
-        sources.append({"title": short_text(title, 200), "url": short_text(url, 300)})
-        if len(sources) >= MAX_COMPRESSED_SOURCES:
-            break
-    return sources
-
-
-def _fallback_digest(state: MeoGraphState) -> dict[str, Any]:
-    """LLM 不可用时的确定性兜底：信息比 LLM 少，但绝不会失败。"""
-    todos = [todo for todo in (state.get("todos") or []) if isinstance(todo, Mapping)]
-    completed = [
-        f"{todo.get('id')} {todo.get('content', '')}"
-        for todo in todos
-        if str(todo.get("status")) == "completed"
-    ]
-    open_todos = [
-        f"{todo.get('id')} [{todo.get('status', 'pending')}] {todo.get('content', '')}"
-        for todo in todos
-        if str(todo.get("status") or "pending") != "completed"
-    ]
-
-    summary_parts: list[str] = []
-    task = str(state.get("task") or "").strip()
-    if task:
-        summary_parts.append(f"任务：{task}")
-    plan_summary = str(state.get("plan_summary") or "").strip()
-    if plan_summary:
-        summary_parts.append(f"计划：{plan_summary}")
-    summary_parts.append(
-        f"尝试：{_safe_int(state.get('attempts'))}/{_safe_int(state.get('max_attempts'), DEFAULT_MAX_ATTEMPTS)}"
-    )
-    last_error = str(state.get("last_error") or "").strip()
-    if last_error:
-        summary_parts.append(f"最近失败：{last_error}")
-
-    return {
-        "summary": "\n".join(summary_parts),
-        "active_goal": plan_summary or task,
-        "completed_work": "\n".join(completed),
-        "open_todos": "\n".join(open_todos),
-        "important_files": "",
-        "tool_findings": str(state.get("research_notes") or ""),
-        "sources": list(state.get("sources") or []),
-        "next_steps": str(state.get("next_instruction") or ""),
-        "risks": last_error,
-    }
-
-
-def _digest_has_content(digest: Mapping[str, Any]) -> bool:
-    """LLM 可能返回"合法 JSON 但字段全不对"（比如把 verifier 的结论丢过来）。
-
-    那种情况按"压缩失败"处理，交给确定性兜底，否则会产出一份空摘要。
-    """
-    if str(digest.get("summary") or "").strip():
-        return True
-    return any(
-        str(_as_text_block(digest.get(key)) or "").strip() for key, _ in _DIGEST_SECTIONS
-    )
-
-
-def _compress_digest(
-    state: MeoGraphState,
-    config: RunnableConfig | None,
-    messages: Sequence[BaseMessage],
-    memory: Mapping[str, Any],
-) -> tuple[dict[str, Any], bool]:
-    """让 LLM 压缩转录；返回 `(digest, 是否走了 LLM)`。"""
-    payload = (
-        "## Layered memory\n"
-        + format_layered_memory_for_prompt(memory)
-        + "\n\n## Transcript to compress\n"
-        + _render_transcript(messages)
-    )
-    try:
-        model = resolve_model(state, config)
-        response = model.invoke(
-            [
-                SystemMessage(content=CONTEXT_COMPRESSION_PROMPT),
-                HumanMessage(content=payload),
-            ]
-        )
-        digest = extract_json_object(message_text(getattr(response, "content", "")))
-        if isinstance(digest, Mapping) and _digest_has_content(digest):
-            return dict(digest), True
-    except Exception:  # noqa: BLE001 - 压缩不能把图跑挂，失败就用确定性兜底
-        pass
-    return _fallback_digest(state), False
-
-
-def context_compressor_node(
-    state: MeoGraphState,
-    config: RunnableConfig | None = None,
-) -> dict[str, Any]:
-    """把长上下文压成"可续跑摘要"，并替换消息历史。
-
-    1. 让 LLM 按 `CONTEXT_COMPRESSION_PROMPT` 产出 9 个字段的 JSON
-       （失败/没模型时用确定性兜底摘要，绝不抛异常）；
-    2. 用 `RemoveMessage(REMOVE_ALL_MESSAGES)` 清空旧消息，再放一条 `AIMessage(摘要)`
-       作为新的上下文起点（`add_messages` reducer 支持这个语义）；
-    3. 摘要落盘 `HISTORY_SUMMARY.md`，并往 `compression_events` 追加一条记录；
-    4. 各字段按上限截断后写回状态（`research_notes` / `sources` / `agent_handoffs` …）。
-
-    Returns:
-        `messages`（RemoveMessage + AIMessage）、`context_summary`、`history_summary`、
-        `context_token_count`（压缩后的新值）、`context_should_compress=False`、
-        `context_next_node`、`research_notes`、`sources`、`agent_handoffs`、
-        `compression_events`、`memory_snapshot`。
-        返回值里的键都在 `MeoGraphState` 里声明过（否则 LangGraph 会拒绝这次更新）。
-    """
-    runtime = require_runtime(state)
-    emit = resolve_emit(config)
-    _emit_node_start(emit, "context_compressor")
-
-    messages = list(state.get("messages") or [])
-    tokens_before = _safe_int(state.get("context_token_count"))
-    memory = build_layered_memory(state, node="context_compressor")
-    digest, used_llm = _compress_digest(state, config, messages, memory)
-
-    summary = short_text(
-        str(digest.get("summary") or "").strip(), COMPRESSION_FIELD_LIMITS["summary"]
-    )
-    digest_text = _render_compression_digest(digest)
-    compressed_message = AIMessage(content=summary or "（上下文已压缩）")
-    new_messages: list[BaseMessage] = [
-        RemoveMessage(id=REMOVE_ALL_MESSAGES),
-        compressed_message,
-    ]
-
-    # 压缩后的 token 数：只算新的那一条消息 + 记忆快照
-    memory_message = SystemMessage(
-        content="[layered memory]\n" + format_layered_memory_for_prompt(memory)
-    )
-    tokens_after = estimate_context_tokens(
-        {**state, "messages": [compressed_message]},  # type: ignore[arg-type]
-        config,
-        memory_payload=memory_message,
-    )
-
-    history_path = None
-    if digest_text or summary:
-        history_path = append_history_summary(
-            runtime, digest_text or summary, heading="Compression"
-        )
-
-    event: dict[str, Any] = {
-        "at": datetime.now().strftime("%Y-%m-%d %H:%M:%S"),
-        "node": "context_compressor",
-        "tokens_before": tokens_before,
-        "tokens_after": tokens_after,
-        "dropped_messages": len(messages),
-        "summary": summary,
-        "used_llm": used_llm,
-        "history_path": history_path,
-    }
-    events = [
-        *list(state.get("compression_events") or []),
-        event,
-    ][-MAX_COMPRESSION_EVENTS:]
-
-    research_notes_parts: list[str] = []
-    existing_notes = str(state.get("research_notes") or "").strip()
-    if existing_notes:
-        research_notes_parts.append(existing_notes)
-    findings = _as_text_block(digest.get("tool_findings"))
-    if findings:
-        research_notes_parts.append(f"## Tool findings\n{findings}")
-    research_notes = short_text("\n\n".join(research_notes_parts), COMPRESSED_NOTES_LIMIT)
-
-    update: dict[str, Any] = {
-        "messages": new_messages,
-        "context_summary": digest_text or summary,
-        "history_summary": summary,
-        "context_token_count": tokens_after,
-        "context_should_compress": False,
-        "context_next_node": str(state.get("context_next_node") or DEFAULT_NEXT_NODE),
-        "research_notes": research_notes,
-        "sources": _coerce_sources(digest.get("sources")),
-        "agent_handoffs": trim_handoffs(state.get("agent_handoffs")),
-        "compression_events": events,
-        "memory_snapshot": memory,
-    }
-
-    if emit is not None:
-        emit(
-            {
-                "type": "context_compressed",
-                "node": "context_compressor",
-                "tokens_before": tokens_before,
-                "tokens_after": tokens_after,
-                "dropped_messages": len(messages),
-                "used_llm": used_llm,
-                "history_path": history_path,
-            }
-        )
-
-    return update

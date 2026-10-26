@@ -150,6 +150,7 @@ def run_search_agent(
         role="actor",
         task_id=task_id,
         message_sink=messages,
+        stream_tokens=True,
     ):
         tagged = {**event, "agent": SEARCH_AGENT_NAME}
         tool_events.append(tagged)

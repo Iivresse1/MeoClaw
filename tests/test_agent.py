@@ -7,11 +7,16 @@ from pathlib import Path
 from typing import Any
 
 import pytest
-from langchain_core.messages import AIMessage, BaseMessage, HumanMessage, SystemMessage, ToolMessage
+from langchain_core.messages import (
+    AIMessage,
+    BaseMessage,
+    HumanMessage,
+    SystemMessage,
+    ToolMessage,
+)
 
 from meoclaw.core.react import (
     ACTOR_PROMPT,
-    execute_tool,
     message_text,
     serialize_tool_result,
     stream_react_events,
@@ -27,7 +32,7 @@ class ScriptedModel:
         self.received: list[list[BaseMessage]] = []
         self.bound_tools: list[Any] = []
 
-    def bind_tools(self, tools: Any) -> "ScriptedModel":
+    def bind_tools(self, tools: Any) -> ScriptedModel:
         self.bound_tools = list(tools)
         return self
 
@@ -77,6 +82,24 @@ def test_stream_react_events_tool_then_final_answer(tmp_path: Path) -> None:
     # 工具真的在 workspace 里生效了（workspace 本身也会被自动创建）
     assert workspace.is_dir()
     assert (workspace / "hello.txt").read_text(encoding="utf-8") == "hi\n"
+
+
+def test_stream_react_events_emits_incremental_tokens(tmp_path: Path) -> None:
+    model = ScriptedModel([AIMessage(content="流式完成")])
+
+    events = list(
+        stream_react_events(
+            "只回复结果",
+            workspace=tmp_path / "ws",
+            model=model,
+            stream_tokens=True,
+        )
+    )
+
+    tokens = [event for event in events if event["type"] == "ai_token"]
+    assert tokens
+    assert "流式完成" in "".join(event["content"] for event in tokens)
+    assert events[-1]["type"] == "final_answer"
 
 
 def test_initial_messages_and_tool_binding(tmp_path: Path) -> None:
@@ -214,18 +237,6 @@ def test_blank_tool_call_id_is_backfilled(tmp_path: Path) -> None:
     assert call_event["id"] == tool_message.tool_call_id
     # AIMessage 里的 tool_calls 与 ToolMessage 严格配对
     assert response.tool_calls[0]["id"] == tool_message.tool_call_id
-
-
-def test_execute_tool_wraps_exceptions() -> None:
-    class BoomTool:
-        name = "BoomTool"
-
-        def invoke(self, args: dict[str, Any]) -> str:
-            raise RuntimeError("炸了")
-
-    ok, result = execute_tool({"BoomTool": BoomTool()}, {"name": "BoomTool", "args": {}})  # type: ignore[arg-type]
-    assert ok is False
-    assert "炸了" in result
 
 
 @pytest.mark.parametrize("task", ["", "   ", None])

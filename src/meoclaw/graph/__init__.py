@@ -10,8 +10,6 @@ from meoclaw.graph.memory import (
 )
 from meoclaw.graph.state import (
     AgentHandoff,
-    CompressionEvent,
-    LayeredMemory,
     MeoGraphState,
     SourceItem,
     TodoItem,
@@ -22,8 +20,6 @@ from meoclaw.graph.state import (
 __all__ = [
     "RULES_LAYER",
     "AgentHandoff",
-    "CompressionEvent",
-    "LayeredMemory",
     "MeoGraphState",
     "SourceItem",
     "TodoItem",

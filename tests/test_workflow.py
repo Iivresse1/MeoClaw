@@ -14,7 +14,6 @@ from meoclaw.core.agent import stream_agent_events
 from meoclaw.graph.workflow import (
     build_complex_workflow,
     build_workflow,
-    context_compressor_route,
     initial_state,
 )
 
@@ -28,7 +27,7 @@ class Fake:
         self._responses = list(responses)
         self.calls: list[list[BaseMessage]] = []
 
-    def bind_tools(self, tools: Any) -> "Fake":
+    def bind_tools(self, tools: Any) -> Fake:
         return self
 
     def invoke(self, messages: list[BaseMessage], **_: Any) -> AIMessage:
@@ -206,20 +205,6 @@ def test_complex_workflow_has_no_actor_node() -> None:
     assert "actor" not in nodes
 
 
-@pytest.mark.parametrize(
-    ("state", "expected"),
-    [
-        ({"context_next_node": "planner"}, "planner"),
-        ({"context_next_node": "final"}, "final"),
-        ({"context_next_node": "verifier"}, "verifier"),
-        ({}, "verifier"),
-        ({"context_next_node": ""}, "verifier"),
-    ],
-)
-def test_context_compressor_route(state: dict[str, Any], expected: str) -> None:
-    assert context_compressor_route(state) == expected
-
-
 def test_complex_workflow_passes_end_to_end(tmp_path: Path) -> None:
     model = Fake(
         [
@@ -278,8 +263,7 @@ def test_complex_workflow_supervisor_delegates_to_code_agent(tmp_path: Path) -> 
 
 
 def test_complex_workflow_terminates_when_attempts_exhausted(tmp_path: Path) -> None:
-    """回归：verifier → context_monitor 上没有 max_attempts 兜底，
-    靠 verifier_node 在试满时写 context_next_node="final" 才能收敛（否则会撞递归上限）。"""
+    """回归：试满 max_attempts 后由 verifier_route 收敛到 final。"""
     model = Fake(
         [
             plan_call(),
@@ -299,128 +283,12 @@ def test_complex_workflow_terminates_when_attempts_exhausted(tmp_path: Path) -> 
 
     assert result["passed"] is False
     assert result["attempts"] == 2  # 没有无限重试
-    assert result["context_next_node"] == "final"
     assert result["final_answer"] == "总结：未完成。"
     assert "还是没做" in result["last_error"]  # last_error 是最新一轮的失败
 
 
-def test_complex_workflow_compresses_before_retrying(tmp_path: Path) -> None:
-    pytest.skip("legacy manual compressor replaced by SummarizationMiddleware")
-    """复杂拓扑里 monitor 在 planner 之后、verifier 之后各过一次。
-
-    `context_token_limit=1` 让每次都超限，所以一轮尝试会压缩两次
-    （规划后一次、验证后一次）；真实默认上限是 400000，只有上下文真的很大才会压。
-    """
-    digest = {
-        "summary": "计划还没落地。",
-        "active_goal": "创建 hello.txt",
-        "completed_work": [],
-        "open_todos": ["写入 hello.txt"],
-        "important_files": [],
-        "tool_findings": "第一次验证失败",
-        "sources": [],
-        "next_steps": "重新规划",
-        "risks": "重复失败",
-    }
-    digest_message = AIMessage(content=json.dumps(digest, ensure_ascii=False))
-    model = Fake(
-        [
-            plan_call(),
-            AIMessage(content="第一轮安排完毕"),  # supervisor 收尾
-            digest_message,  # monitor#1（规划后）
-            verdict(False, "还没有文件"),
-            digest_message,  # monitor#2（验证失败后）
-            plan_call("压缩后重新规划"),
-            AIMessage(content="第二轮安排完毕"),  # supervisor 收尾
-            digest_message,  # monitor#3（第二轮规划后）
-            verdict(False, "依然没有文件"),
-            digest_message,  # monitor#4（第二轮验证后）
-            AIMessage(content="总结：未完成。"),
-        ]
-    )
-    state = initial_state(
-        "创建 hello.txt", workspace=tmp_path / "ws", model=model, max_attempts=2
-    )
-    state["context_token_limit"] = 1  # 强制压缩
-
-    events: list[dict[str, Any]] = []
-    result = build_complex_workflow().invoke(state, {"configurable": {"emit": events.append}})
-
-    assert result["passed"] is False
-    assert result["attempts"] == 2  # 压缩不影响尝试计数，也不影响收敛
-    assert len(result["compression_events"]) == 4
-    assert all(event["used_llm"] for event in result["compression_events"])
-    # supervisor 自己的消息（计划 + 收尾）也会被压掉；后续每次都有新内容可丢
-    dropped = [event["dropped_messages"] for event in result["compression_events"]]
-    assert dropped[0] > 0
-    assert sum(dropped) > dropped[0]
-    assert result["history_summary"] == digest["summary"]
-    kinds = {event["type"] for event in events}
-    assert {"context_usage", "context_compressed"} <= kinds
-    assert (tmp_path / "ws" / "HISTORY_SUMMARY.md").is_file()
-
-
-# --------------------------------------------------------------------------- #
 # 统一事件流（core.agent.stream_agent_events：驱动整张图）
 # --------------------------------------------------------------------------- #
-def test_build_workflow_compresses_context_on_retry(tmp_path: Path) -> None:
-    pytest.skip("legacy manual compressor replaced by SummarizationMiddleware")
-    """失败重试前先压缩上下文：验证 monitor → compressor → planner 这条链路真的通。"""
-    digest = {
-        "summary": "已实现 add，测试还没跑过。",
-        "active_goal": "让 add 通过测试",
-        "completed_work": ["utils.py 的 add 已实现"],
-        "open_todos": ["补测试"],
-        "important_files": ["utils.py"],
-        "tool_findings": "第一次写的内容不对",
-        "sources": [{"title": "pytest 文档", "url": "https://docs.pytest.org"}],
-        "next_steps": "把内容改成 hello",
-        "risks": "重复踩同一个坑",
-    }
-    model = Fake(
-        [
-            plan_call(),
-            write_call("bad\n", "w1"),
-            AIMessage(content="第一次写完了"),
-            verdict(False, "内容应为 hello"),
-            AIMessage(content=json.dumps(digest, ensure_ascii=False)),  # 压缩节点
-            plan_call("修订：内容改成 hello"),
-            write_call("hello\n", "w2"),
-            AIMessage(content="第二次写完了"),
-            verdict(True, "内容正确"),
-            AIMessage(content="总结：已完成。"),  # final_node
-        ]
-    )
-    state = initial_state("创建 hello.txt 并写 hello", workspace=tmp_path / "ws", model=model)
-    # 阈值设成 1：必然触发压缩
-    state["context_token_limit"] = 1
-
-    result = build_workflow().invoke(state, {"configurable": {"emit": None}})
-
-    assert result["passed"] is True
-    assert result["attempts"] == 2
-    assert result["context_should_compress"] is False  # 刚压过
-
-    events = result["compression_events"]
-    assert len(events) == 1
-    assert events[0]["node"] == "context_compressor"
-    assert events[0]["used_llm"] is True
-    assert events[0]["dropped_messages"] > 0
-    assert events[0]["tokens_after"] < events[0]["tokens_before"]
-
-    assert result["history_summary"] == digest["summary"]
-    assert any(
-        digest["summary"] in str(getattr(message, "content", ""))
-        for message in result["messages"]
-    )
-
-    history_file = tmp_path / "ws" / "HISTORY_SUMMARY.md"
-    assert history_file.is_file()
-    assert "## Compression" in history_file.read_text(encoding="utf-8")
-    # 压缩后的检索要点进了 research_notes
-    assert "第一次写的内容不对" in result["research_notes"]
-
-
 def test_stream_agent_events_yields_unified_events(tmp_path: Path) -> None:
     model = Fake(
         [

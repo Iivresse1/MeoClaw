@@ -97,8 +97,8 @@ Runtime defaults:
 Set `MEOCLAW_SANDBOX_NETWORK=1` only for an explicitly approved task that needs
 network access.
 
-## Legacy Compatibility
+## History
 
-The old `context_monitor`/`context_compressor` helpers remain importable for
-historical tests, but they are disconnected from both workflows. New agents use
-`SummarizationMiddleware` and `ContextBuilder`.
+The obsolete 1.0 manual context monitor/compressor has been removed. Version 1.1
+uses `SummarizationMiddleware` for in-agent context compression and
+`ContextBuilder` for role-specific context projection.

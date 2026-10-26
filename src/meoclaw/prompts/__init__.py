@@ -15,12 +15,10 @@ from meoclaw.prompts.stage3 import (
     SUPERVISOR_PROMPT,
     VERIFIER_PROMPT,
 )
-from meoclaw.prompts.stage4 import CONTEXT_COMPRESSION_PROMPT
 
 __all__ = [
     "ACTOR_PROMPT",
     "CODE_AGENT_PROMPT",
-    "CONTEXT_COMPRESSION_PROMPT",
     "FINAL_PROMPT",
     "PLANNER_PROMPT",
     "SEARCH_AGENT_PROMPT",

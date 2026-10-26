@@ -15,12 +15,11 @@
 事件类型（`event["type"]`）：
 
     node_start            某个节点开始（node）
+    ai_token              模型增量文本（content）
     ai_message            模型输出（actor / verifier）
     tool_call             即将执行的工具调用（node / name / args）
     tool_result           工具结果（node / name / result / ok）
     verification_command  验收命令执行结果（node / command / ok / exit_code）
-    context_usage         上下文用量（node / token_count / token_limit / should_compress / next_node）
-    context_compressed    上下文已压缩（node / tokens_before / tokens_after / dropped_messages / used_llm）
     react_done            节点内部 ReAct 循环收尾（node）—— 注意不是最终的 final_answer
     plan                  planner 的计划（plan_summary / todos / acceptance_criteria / verification_commands）
     actor_summary         actor 的收尾总结（content / todos）
@@ -44,7 +43,6 @@ from langchain_core.language_models import BaseChatModel
 
 from meoclaw.core.react import (
     ACTOR_PROMPT,
-    execute_tool,
     message_text,
     serialize_tool_result,
 )
@@ -56,7 +54,6 @@ from meoclaw.providers.openai_provider import create_model
 __all__ = [
     "ACTOR_PROMPT",
     "UNIFIED_EVENT_TYPES",
-    "execute_tool",
     "message_text",
     "serialize_tool_result",
     "stream_agent_events",
@@ -65,12 +62,11 @@ __all__ = [
 #: 统一事件流里可能出现的事件类型（便于消费方做穷举分支）
 UNIFIED_EVENT_TYPES: tuple[str, ...] = (
     "node_start",
+    "ai_token",
     "ai_message",
     "tool_call",
     "tool_result",
     "verification_command",
-    "context_usage",
-    "context_compressed",
     "react_done",
     "plan",
     "actor_summary",

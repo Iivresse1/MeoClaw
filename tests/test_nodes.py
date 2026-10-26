@@ -12,7 +12,6 @@ from langchain_core.messages import AIMessage, BaseMessage, SystemMessage, ToolM
 from langgraph.graph import END, START, StateGraph
 
 from meoclaw.core.state import RuntimeState
-from meoclaw.graph.state import MeoGraphState
 from meoclaw.graph.nodes import (
     CALL_CODE_AGENT_TOOL,
     CALL_SEARCH_AGENT_TOOL,
@@ -21,9 +20,6 @@ from meoclaw.graph.nodes import (
     MAX_ACTOR_LOOPS,
     PlannerError,
     actor_node,
-    compose_actor_prompt,
-    compose_supervisor_brief,
-    compose_verifier_brief,
     extract_json_object,
     extract_plan,
     final_node,
@@ -36,7 +32,13 @@ from meoclaw.graph.nodes import (
     verifier_node,
     verifier_route,
 )
-from meoclaw.prompts import FINAL_PROMPT, PLANNER_PROMPT, SUPERVISOR_PROMPT, VERIFIER_PROMPT
+from meoclaw.graph.state import MeoGraphState
+from meoclaw.prompts import (
+    FINAL_PROMPT,
+    PLANNER_PROMPT,
+    SUPERVISOR_PROMPT,
+    VERIFIER_PROMPT,
+)
 from meoclaw.tools.todo_tool import TodoWriteTool
 
 PASS_COMMAND = f'"{sys.executable}" -c "print(1)"'
@@ -51,7 +53,7 @@ class ScriptedModel:
         self.calls: list[list[BaseMessage]] = []
         self.bound_tool_names: list[list[str]] = []
 
-    def bind_tools(self, tools: Any) -> "ScriptedModel":
+    def bind_tools(self, tools: Any) -> ScriptedModel:
         self.bound_tool_names.append([tool.name for tool in tools])
         return self
 
@@ -172,9 +174,6 @@ def test_planner_node_uses_todo_write_tool(state: dict[str, Any]) -> None:
     assert update["verification_commands"] == [PASS_COMMAND]
     assert update["passed"] is False
     assert update["max_attempts"] == DEFAULT_MAX_ATTEMPTS
-    # 上游节点负责写好"下一步去哪"：supervisor 拓扑里 planner 之后是 verifier
-    # （简单拓扑里 planner → actor，但该值会被 verifier 覆盖，不会被路由读到）
-    assert update["context_next_node"] == "verifier"
 
 
 def test_planner_node_revises_with_last_error(state: dict[str, Any]) -> None:
@@ -241,23 +240,6 @@ def test_extract_plan_prefers_tool_call() -> None:
 # --------------------------------------------------------------------------- #
 # actor
 # --------------------------------------------------------------------------- #
-def test_compose_actor_prompt_contains_plan_and_error(state: dict[str, Any]) -> None:
-    state.update(
-        {
-            "plan_summary": "先写文件",
-            "todos": [{"id": "t1", "content": "写文件", "status": "pending", "note": ""}],
-            "acceptance_criteria": ["文件存在"],
-            "verification_commands": [PASS_COMMAND],
-            "last_error": "内容不对",
-            "next_instruction": "改成 hello",
-        }
-    )
-    prompt = compose_actor_prompt(state)
-
-    for fragment in ("Plan summary", "先写文件", "写文件", "文件存在", "内容不对", "改成 hello"):
-        assert fragment in prompt
-
-
 def test_actor_node_runs_tools_and_updates_todos(state: dict[str, Any]) -> None:
     state.update(
         {
@@ -306,7 +288,6 @@ def test_actor_node_runs_tools_and_updates_todos(state: dict[str, Any]) -> None:
     assert update["todos"][0]["status"] == "completed"
     assert update["todos"][0]["note"] == "已写入"
     assert update["last_actor_summary"] == "已完成：写入 hello.txt"
-    assert update["context_next_node"] == "verifier"
 
     # 事件被转发给 emit（第一个是 node_start；ReAct 收尾事件会被改名成 react_done）
     kinds = [event["type"] for event in events]
@@ -365,7 +346,7 @@ def _verifier_state(state: dict[str, Any], **overrides: Any) -> dict[str, Any]:
 
 def test_build_read_only_tools_excludes_writers() -> None:
     """只读集合必须排除一切会改工作区的工具（含 NotepadAppendTool）。"""
-    from meoclaw.tools.registry import READ_ONLY_TOOL_NAMES, build_read_only_tools
+    from meoclaw.tools.registry import READ_ONLY_TOOL_NAMES
 
     names = list(READ_ONLY_TOOL_NAMES)
     assert names == ["FileReadTool", "GrepTool", "NotepadReadTool", "WebSearchTool"]
@@ -381,8 +362,7 @@ def test_build_read_only_tools_excludes_writers() -> None:
 
 def test_verifier_prompt_lives_in_stage3() -> None:
     """VERIFIER_PROMPT 只在 stage3 定义一处，避免两份提示词漂移。"""
-    import meoclaw.prompts.stage2 as stage2
-    import meoclaw.prompts.stage3 as stage3
+    from meoclaw.prompts import stage2, stage3
 
     assert stage3.VERIFIER_PROMPT == VERIFIER_PROMPT
     assert not hasattr(stage2, "VERIFIER_PROMPT")
@@ -401,7 +381,6 @@ def test_verifier_node_passes(state: dict[str, Any]) -> None:
     assert update["last_error"] == ""
     assert update["next_instruction"] == ""
     assert update["todos"][0]["status"] == "completed"
-    assert update["context_next_node"] == FINAL
     assert [result["ok"] for result in update["verification_results"]] == [True]
     # 只读工具：能查证，但改不了东西（NotepadReadTool / WebSearchTool 是 VERIFIER_PROMPT 点名的）
     assert model.bound_tool_names == [
@@ -440,8 +419,6 @@ def test_verifier_node_failed_verdict_sets_last_error(state: dict[str, Any]) -> 
     assert "文件内容不对" in update["last_error"]
     assert "修正 hello.txt 的内容" in update["last_error"]
     assert update["next_instruction"] == "修正 hello.txt 的内容"
-    # 失败后由 context_monitor 送回 planner
-    assert update["context_next_node"] == "planner"
 
 
 def test_verifier_node_unparseable_output_fails_closed(state: dict[str, Any]) -> None:
@@ -453,19 +430,6 @@ def test_verifier_node_unparseable_output_fails_closed(state: dict[str, Any]) ->
 
     assert update["passed"] is False
     assert "JSON" in update["last_error"]
-
-
-def test_compose_verifier_brief_includes_evidence(state: dict[str, Any]) -> None:
-    _verifier_state(state)
-    brief = compose_verifier_brief(
-        state,
-        [{"command": PASS_COMMAND, "ok": True, "exit_code": 0, "stdout": "1", "stderr": ""}],
-    )
-
-    assert "Acceptance criteria" in brief
-    assert "Verification command results" in brief
-    assert "exit_code=0" in brief
-    assert "Latest actor summary" in brief
 
 
 def test_parse_verdict_normalises_checks() -> None:
@@ -754,7 +718,6 @@ def test_supervisor_node_binds_delegation_tools(state: dict[str, Any]) -> None:
     assert update["plan_summary"] == state["task"]
     assert (state["runtime"].workspace / "TODO.md").is_file()
     assert update["passed"] is False
-    assert update["context_next_node"] == "verifier"
     assert update["research_notes"] == ""
     assert update["sources"] == []
     assert update["agent_handoffs"] == []
@@ -866,36 +829,12 @@ def test_supervisor_node_unknown_tool_degrades(
     state["runtime"].metadata["model"] = model
     events: list[dict[str, Any]] = []
 
-    update = supervisor_node(state, {"configurable": {"emit": events.append}})
+    supervisor_node(state, {"configurable": {"emit": events.append}})
 
     failed = [event for event in events if event["type"] == "tool_result" and not event["ok"]]
     assert len(failed) == 1
     assert "未知工具" in str(failed[0]["result"])
     # 循环没有被失败打断，supervisor 正常收尾
-    assert update["context_next_node"] == "verifier"
-
-
-def test_compose_supervisor_brief_includes_failure_and_memory(state: dict[str, Any]) -> None:
-    state.update(
-        {
-            "todos": [{"id": "t1", "content": "写文件", "status": "pending", "note": ""}],
-            "plan_summary": "写文件",
-            "last_error": "内容不对",
-            "next_instruction": "改成 hello",
-            "attempts": 1,
-        }
-    )
-
-    brief = compose_supervisor_brief(state, "创建 hello.txt", {"rules": {"scope": "workspace"}})
-
-    assert "## Task" in brief
-    assert "Attempt: 2" in brief
-    assert "failed verification" in brief
-    assert "内容不对" in brief
-    assert "改成 hello" in brief
-    assert "## Memory snapshot" in brief
-    assert "Call TodoWriteTool" in brief
-    assert "CallSearchAgentTool" in brief
 
 
 def test_supervisor_node_requires_task(runtime: RuntimeState) -> None:

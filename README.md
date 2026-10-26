@@ -15,7 +15,7 @@ MeoClaw 是一个本地桌面的 AI 助理：支持纯对话、工作区文件�
 
 ```
 输入消息 → POST /api/task（懒建会话、用户消息落库、后台线程启动）
-        → WS /ws/task/{id} 推事件（node_start / plan / tool_call / tool_result /
+        → WS /ws/task/{id} 推事件（node_start / ai_token / plan / tool_call / tool_result /
           verification / final_answer / approval_request / ui_done）
         → final_answer 自动落库为助手消息 → 侧边栏刷新会话标题
 ```
@@ -34,13 +34,12 @@ MeoClaw 是一个本地桌面的 AI 助理：支持纯对话、工作区文件�
 │     └─ system_tools.py      # 系统工具集（5 个，高危需批准）
 ├─ desktop/                   # Electron + React 前端
 │  ├─ electron/main.cjs       # 主进程：桥接子进程管理、窗口、去菜单
-│  ├─ electron/preload.cjs    # 仅暴露 bridgePort
+│  ├─ electron/preload.cjs    # 通过 IPC 暴露 bridgePort 与能力令牌
 │  └─ src/                    # App.tsx + api.ts + components/ + styles.css
-├─ structure_viewer/          # 后端核心交互式架构图（见其 README.md）
 ├─ src/meoclaw/               # 后端核心（agents / cli / core / graph / prompts / providers / tools）
 ├─ tests/                     # 后端全链路测试（假模型，无需 API Key）
 ├─ pyproject.toml             # 后端打包与依赖声明
-├─ 项目架构指南.md            # 后端完整 Code Wiki
+├─ ARCHITECTURE_V1.1.md       # 当前运行架构与安全边界
 └─ requirements.txt           # 桥接层 Python 依赖
 ```
 
@@ -66,7 +65,7 @@ MeoClaw 是一个本地桌面的 AI 助理：支持纯对话、工作区文件�
 
 ### 前端（desktop/src）
 
-- `App.tsx`：全局状态中枢；`handleEvent()` 将事件流映射为进度步骤/流式文本/审批卡；Ctrl+B 切换侧边栏；权限档位即时持久化
+- `App.tsx`：全局状态中枢；`handleEvent()` 将 `ai_token` 增量映射为流式回答，并把计划、工具、验证和审批显示为实时进度；Ctrl+B 切换侧边栏
 - `api.ts`：REST 封装 + `taskSocket()`；端口取 `window.meoclaw.bridgePort`（纯浏览器调试回落 8931）
 - 组件：`Sidebar`（品牌+新会话+历史）、`ChatView`（欢迎屏/消息流）、`Composer`（输入卡片+权限下拉，无模型选择器）、`ProgressCard`（可折叠执行过程）、`ApprovalCard`（允许/拒绝）、`SettingsModal`（供应商与运行参数）
 - `styles.css`：黑白浅色主题（主色 `#171717`，无彩色）
@@ -102,28 +101,64 @@ desktop(渲染层) ──HTTP/WS──▶ bridge(8931) ──pip -e──▶ meo
 
 ## 快速开始
 
+### 环境要求
+
+- Windows 10/11
+- Python 3.10+
+- Node.js 20+
+- Docker Desktop（WSL2 后端）
+- 一个 OpenAI 兼容模型供应商
+
+以下命令假设在仓库根目录执行，Python 环境目录为 `pyruntime`。
+
 ```powershell
-# 1) 后端核心 + Python 依赖（建议独立 venv，如 pyruntime）
+# 1. 获取代码
 git clone https://github.com/Iivresse1/MeoClaw.git meoclaw
 cd meoclaw
+
+# 2. 创建 Python 环境并安装后端、桥接层依赖
 python -m venv pyruntime
-pyruntime\Scripts\python.exe -m pip install -e ".[dev]"
 pyruntime\Scripts\python.exe -m pip install -r requirements.txt
 
-# 先安装并启动 Docker Desktop（Windows 使用 WSL2 后端）
-# 构建工作区 shell 的 Docker 沙箱镜像
+# 3. 启动 Docker Desktop，然后构建隔离 shell 镜像
 .\scripts\build-sandbox.ps1
 
-# 2) 前端依赖
+# 4. 安装桌面端依赖
 cd desktop
 npm install
-
-# 3) 运行（Electron 自动拉起或复用桥接服务，端口 MEOCLAW_BRIDGE_PORT，默认 8931）
-npm run dev                 # 开发模式（vite 热更新）
-npm run build; npm start    # 生产模式（加载 dist）
 ```
 
-首次启动后打开「设置」添加模型供应商即可开始对话。
+开发模式启动 Vite、Electron 和本地 Bridge：
+
+```powershell
+cd desktop
+npm run dev
+```
+
+生产模式构建并启动：
+
+```powershell
+cd desktop
+npm run build
+npm start
+```
+
+启动后打开应用「设置」，填写供应商名称、模型名、Base URL 和 API Key。Agent 的文本、计划、工具调用、验证命令和审批请求会通过 WebSocket 实时更新。
+
+Docker Hub 或 Debian/PyPI 下载较慢时，可以传入镜像参数：
+
+```powershell
+.\scripts\build-sandbox.ps1 `
+  -PythonImage docker.m.daocloud.io/library/python:3.12-slim `
+  -DebianMirror mirrors.tuna.tsinghua.edu.cn `
+  -PipIndexUrl https://pypi.tuna.tsinghua.edu.cn/simple
+```
+
+桥接健康检查：
+
+```powershell
+Invoke-RestMethod http://127.0.0.1:8931/api/health
+```
 
 ## 配置
 
@@ -167,13 +202,9 @@ npm run build; npm start    # 生产模式（加载 dist）
 ---
 
 新的运行架构、ContextBuilder、middleware、SQLite 恢复和 Docker 安全边界见
-[ARCHITECTURE_V1.1.md](ARCHITECTURE_V1.1.md)。`项目架构指南.md` 记录的是 1.0
-后端历史设计，不再代表当前执行路径。
+[ARCHITECTURE_V1.1.md](ARCHITECTURE_V1.1.md)。
 
 > 仓库分支说明：**`main`** 为完整项目（后端核心 `src/` + 桥接层 `bridge/` + 桌面端 `desktop/`）；
 > **`branch`** 为后端核心 `meoclaw` 的备份分支。
 
->本项目的前端部分参考dsh和openclaw进行了重新设计，AI辅助实现。
-> 后端核心的完整架构、模块职责、关键类与函数、事件系统、安全模型与扩展指南见
-> [项目架构指南.md](项目架构指南.md)；
-> 交互式分层架构图（模块级 → 函数级 → 代码行级下钻）见 [structure_viewer/](structure_viewer/README.md)。
+本项目前端参考 dsh 与 openclaw 重新设计，并由 AI 辅助实现。

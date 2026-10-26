@@ -40,21 +40,17 @@ from meoclaw.graph.state import MeoGraphState
 if TYPE_CHECKING:  # pragma: no cover - 仅用于类型提示
     from langgraph.graph.state import CompiledStateGraph
 
-__all__ = ["build_complex_workflow", "build_workflow", "context_compressor_route", "initial_state"]
+__all__ = ["build_complex_workflow", "build_workflow", "initial_state"]
 
 
 def build_workflow(checkpointer: Any = None) -> CompiledStateGraph:
-    """组装并编译 planner → actor → verifier →（必要时压缩）→ final/planner 的图。
+    """组装并编译 planner → actor → verifier → final/planner 的图。
 
     Returns:
         已编译的 LangGraph（`invoke` / `stream` 都能用）。
         节点名与路由函数的返回值一一对应。
 
-    路由设计：
-    - `verifier_route` 保留 `attempts >= max_attempts → final` 的兜底，负责"还要不要重试"；
-    - 只有在"要重试"（`"planner"`）这条分支上才经过 `context_monitor`：
-      它判断上下文是否过大 → 需要就先 `context_compressor` 压缩，再回到 planner。
-      这样成功路径（→ final）完全不受影响，也避免压缩节点被反复触发。
+    `verifier_route` 保留 `attempts >= max_attempts → final` 的兜底。
     """
     graph = StateGraph(MeoGraphState)  #StateGraph 是主要的图类，以用户定义的 State 对象作为类型参数。
 
@@ -78,31 +74,16 @@ def build_workflow(checkpointer: Any = None) -> CompiledStateGraph:
     return graph.compile(checkpointer=checkpointer)
 
 
-def context_compressor_route(state: MeoGraphState) -> str:
-    """压缩后去哪里？由上游写好的 `context_next_node` 决定（默认 `"verifier"`）。
-
-    压缩只会在"没通过"的分支上发生（`context_monitor_route` 先判 `passed`），
-    所以这里的值通常是 `"planner"`（继续修）或 `"final"`（试满了）。
-    """
-    return str(state.get("context_next_node") or "verifier")
-
-
 def build_complex_workflow(checkpointer: Any = None) -> CompiledStateGraph:
     """完整的 supervisor 拓扑：planner 直接面对 verifier，**没有 actor 节点**。
 
-        START → planner(supervisor) → context_monitor ─┬─ 需要压缩 → context_compressor ─┐
-                                                       │                                 │
-                                                       └────────────→ verifier ←─────────┘
-                                                                        │
-                                  verifier → context_monitor ←──────────┘   （验证后也过 monitor）
+        START → planner(supervisor) → verifier → final/planner
 
     与 `build_workflow()` 的区别：
 
     - 没有 actor 节点 —— planner 以 supervisor 形态运行（`supervisor_node`），
       通过 `CallSearchAgentTool` / `CallCodeAgentTool` 把研究与实现委派给专家 Agent；
-    - 路由统一交给 `context_monitor_route` / `context_compressor_route`，
-      `verifier_route` 不再参与（所以收敛性靠 `verifier_node` 在试满 max_attempts 时
-      把 `context_next_node` 写成 `"final"`，见该函数注释）。
+    - `verifier_route` 负责通过、重试和试满后的收敛。
     """
     graph = StateGraph(MeoGraphState)
 

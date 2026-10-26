@@ -46,6 +46,7 @@ htmlcov/
 node_modules/
 *.sqlite
 *.sqlite3
+*.log
 
 # 运行时工作区（工具产物默认落在这里）
 /workspace/

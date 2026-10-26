@@ -165,7 +165,7 @@ def _worker(
                 checkpointer,
                 resume,
             )
-    except Exception as exc:
+    except Exception as exc:  # noqa: BLE001 - worker boundary must forward every failure
         q.put({"type": "error", "message": f"{type(exc).__name__}: {exc}"[:300]})
     finally:
         if not paused:
@@ -250,6 +250,7 @@ def _run_tools(
         approval_tools=APPROVAL_TOOLS,
         checkpointer=checkpointer,
         resume=resume,
+        stream_tokens=True,
     ):
         if ev.get("type") == "approval_request":
             paused = True
