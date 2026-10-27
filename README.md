@@ -110,15 +110,15 @@ desktop(渲染层) ──HTTP/WS──▶ bridge(8931) ──pip -e──▶ meo
 - Docker Desktop（WSL2 后端）
 - 一个 OpenAI 兼容模型供应商
 
-如果你没有在本地下载Docker，可以尝试清华 Docker CE 镜像，根地址为：
+-如果你没有在本地下载Docker，可以尝试清华 Docker CE 镜像，根地址为：
 
 https://mirrors.tuna.tsinghua.edu.cn/docker-ce/
 
-准备Docker完成后，可以自己创建一个根目录(比如C:\Users:\Desktop\meoagent)。
+-准备Docker完成后，可以自己创建一个根目录(比如C:\Users:\Desktop\meoagent)。
 
-然后右键开始打开终端(管理员)或Win+R输入powershell，按住Ctrl+Shift+Enter以管理员方式打开powershell。先输入cd (你的根目录地址)，再依次输入下列命令:
+-然后右键开始打开终端(管理员)或Win+R输入powershell，按住Ctrl+Shift+Enter以管理员方式打开powershell。先输入cd (你的根目录地址)，再依次输入下列命令:
 
-(以下命令需在同一个 PowerShell 会话中依次执行。每一步成功后再进入下一步；如果某一步失败，不要继续执行后面的启动命令。Python 环境目录固定为仓库根目录下的 `pyruntime`。)
+-(以下命令需在同一个 PowerShell 会话中依次执行。每一步成功后再进入下一步；如果某一步失败，不要继续执行后面的启动命令。Python 环境目录固定为仓库根目录下的 `pyruntime`。)
 
 ```powershell
 # 1. 获取代码
