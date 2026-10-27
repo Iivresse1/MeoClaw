@@ -2,7 +2,7 @@
 
 MeoClaw 是一个本地桌面的 AI 助理。所有请求都由同一个 Main Agent 接收：普通问答直接回答，需要文件、shell 或系统操作时进入 planner → actor → verifier 工作流。用户只选择人工审核、AI 自动审核或完全权限，权限策略与 Agent 身份相互独立。
 
-~想看如何构建后端的？可以打开 docs 下的 BACKEND_GUIDE 进行阅读。
+~想看如何构建后端的？可以打开docs下的BACKEND_GUIDE进行阅读。
 
 ## 项目整体架构
 
@@ -112,7 +112,15 @@ desktop(渲染层) ──HTTP/WS──▶ bridge(8931) ──pip -e──▶ meo
 - Docker Desktop（WSL2 后端）
 - 一个 OpenAI 兼容模型供应商
 
-以下命令需在同一个 PowerShell 会话中依次执行。每一步成功后再进入下一步；如果某一步失败，不要继续执行后面的启动命令。Python 环境目录固定为仓库根目录下的 `pyruntime`。
+-如果你没有在本地下载Docker，可以尝试清华 Docker CE 镜像，根地址为：
+
+https://mirrors.tuna.tsinghua.edu.cn/docker-ce/
+
+-准备Docker完成后，可以自己创建一个根目录(比如C:\Users:\Desktop\meoagent)。
+
+-然后右键开始打开终端(管理员)或Win+R输入powershell，按住Ctrl+Shift+Enter以管理员方式打开powershell。先输入cd (你的根目录地址)，再依次输入下列命令:
+
+-(以下命令需在同一个 PowerShell 会话中依次执行。每一步成功后再进入下一步；如果某一步失败，不要继续执行后面的启动命令。Python 环境目录固定为仓库根目录下的 `pyruntime`。)
 
 ```powershell
 # 1. 获取代码
