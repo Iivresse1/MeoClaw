@@ -49,6 +49,9 @@ Rules:
 - Use FileReadTool before editing existing files.
 - Use FileEditTool for focused edits.
 - Use BashTool to run commands and test results.
+- Use WebSearchTool for current information and WebFetchTool to read a useful
+  source page in more detail.
+- Cite source URLs when outside information affects the result.
 - BashTool already runs inside the workspace. Use relative paths, never "cd /workspace".
 - End with a concise summary of files changed and commands run.
 - Work through the plan you are given, and keep todo statuses up to date with

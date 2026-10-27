@@ -7,6 +7,7 @@ from meoclaw.graph.memory import (
     format_layered_memory_for_prompt,
     read_history_summary,
     read_notepad,
+    summarize_task_for_history,
 )
 from meoclaw.graph.state import (
     AgentHandoff,
@@ -30,4 +31,5 @@ __all__ = [
     "format_layered_memory_for_prompt",
     "read_history_summary",
     "read_notepad",
+    "summarize_task_for_history",
 ]

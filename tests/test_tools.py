@@ -4,13 +4,16 @@ from __future__ import annotations
 
 import sys
 from pathlib import Path
+from typing import Any
 
 import pytest
 from langchain_core.tools import StructuredTool, ToolException
 
+import meoclaw.core.sandbox as sandbox_module
+import meoclaw.tools.bash_tool as bash_module
 from meoclaw.core.paths import WorkspaceError, resolve_in_workspace
 from meoclaw.core.state import RuntimeState
-from meoclaw.tools.bash_tool import run_bash
+from meoclaw.tools.bash_tool import execute_command, run_bash
 from meoclaw.tools.file_tools import edit_file, read_file, write_file
 from meoclaw.tools.grep_tool import grep
 from meoclaw.tools.registry import TOOL_NAMES, build_tool_map, build_tools
@@ -276,6 +279,58 @@ def test_bash_rejects_empty_command(state: RuntimeState) -> None:
         run_bash(state, "   ")
 
 
+def test_bash_docker_mode_runs_through_sandbox_command(
+    state: RuntimeState,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    state.metadata["sandbox"] = "docker"
+    monkeypatch.setattr(sandbox_module.shutil, "which", lambda _: "docker")
+    captured: dict[str, Any] = {}
+
+    class FakeProcess:
+        returncode = 0
+
+        def communicate(self, timeout: int | None = None) -> tuple[bytes, bytes]:
+            captured["timeout"] = timeout
+            return b"inside-container\n", b""
+
+        def poll(self) -> int:
+            return self.returncode
+
+    def fake_popen(command: Any, **kwargs: Any) -> FakeProcess:
+        captured["command"] = command
+        captured["kwargs"] = kwargs
+        return FakeProcess()
+
+    monkeypatch.setattr(bash_module.subprocess, "Popen", fake_popen)
+
+    outcome = execute_command(state, "python -m pytest -q")
+
+    command = captured["command"]
+    assert isinstance(command, list)
+    assert command[:3] == ["docker", "run", "-i"]
+    assert "--rm" in command
+    assert command[command.index("--network") + 1] == "none"
+    assert command[command.index("-w") + 1] == "/workspace"
+    assert "--read-only" in command
+    assert command[-3:] == ["/bin/bash", "-lc", "python -m pytest -q"]
+    assert captured["kwargs"]["shell"] is False
+    assert "cwd" not in captured["kwargs"]
+    assert outcome["ok"] is True
+    assert outcome["stdout"] == "inside-container"
+
+
+def test_bash_docker_mode_fails_closed_without_docker(
+    state: RuntimeState,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    state.metadata["sandbox"] = "docker"
+    monkeypatch.setattr(sandbox_module.shutil, "which", lambda _: None)
+
+    with pytest.raises(ToolException, match="Docker 未安装"):
+        execute_command(state, "python -m pytest -q")
+
+
 # --------------------------------------------------------------------------- #
 # registry
 # --------------------------------------------------------------------------- #
@@ -340,12 +395,14 @@ def test_web_search_rejects_blank_query() -> None:
 
 def test_web_search_requires_api_key(monkeypatch: pytest.MonkeyPatch) -> None:
     """缺 TAVILY_API_KEY 时返回结构化错误，不抛异常。"""
-    from meoclaw.tools import web_search_tool
+    from meoclaw.tools import web_access
 
-    monkeypatch.setattr(web_search_tool, "load_env", lambda: None)
+    monkeypatch.setattr(web_access, "load_env", lambda: None)
     monkeypatch.delenv("TAVILY_API_KEY", raising=False)
 
-    result = web_search_tool.web_search("LangGraph")
+    from meoclaw.tools.web_search_tool import web_search
+
+    result = web_search("LangGraph")
 
     assert result["ok"] is False
     assert "TAVILY_API_KEY" in result["error"]
@@ -375,7 +432,9 @@ def test_web_search_parses_tavily_results(
                 ],
             }
 
-    monkeypatch.setattr(web_search_tool, "load_env", lambda: None)
+    from meoclaw.tools import web_access
+
+    monkeypatch.setattr(web_access, "load_env", lambda: None)
     monkeypatch.setenv("TAVILY_API_KEY", "test-key")
     monkeypatch.setitem(
         sys.modules, "tavily", types.SimpleNamespace(TavilyClient=FakeTavilyClient)
@@ -396,7 +455,10 @@ def test_web_search_parses_tavily_results(
 
 
 def test_web_search_tool_schema_and_name() -> None:
-    from meoclaw.tools.web_search_tool import WEB_SEARCH_TOOL_NAME, build_web_search_tool
+    from meoclaw.tools.web_search_tool import (
+        WEB_SEARCH_TOOL_NAME,
+        build_web_search_tool,
+    )
 
     tool = build_web_search_tool()
     assert tool.name == WEB_SEARCH_TOOL_NAME
@@ -409,4 +471,4 @@ def test_build_read_only_tools_contains_web_search(state: RuntimeState) -> None:
 
     tools = build_read_only_tools(state)
     assert [tool.name for tool in tools] == list(READ_ONLY_TOOL_NAMES)
-    assert tools[-1].name == "WebSearchTool"
+    assert [tool.name for tool in tools[-2:]] == ["WebSearchTool", "WebFetchTool"]

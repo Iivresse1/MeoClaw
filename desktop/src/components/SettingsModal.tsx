@@ -1,6 +1,6 @@
 import { useEffect, useState } from "react";
 import { api } from "../api";
-import type { Provider, Settings } from "../api";
+import type { Provider, Settings, TavilyStatus } from "../api";
 
 interface Form {
   name: string;
@@ -17,8 +17,17 @@ export default function SettingsModal({ onClose }: { onClose: () => void }) {
   const [editing, setEditing] = useState<string | null>(null); // 正在编辑的供应商名
   const [msg, setMsg] = useState("");
   const [testing, setTesting] = useState(false);
+  const [tavily, setTavily] = useState<TavilyStatus | null>(null);
+  const [tavilyKey, setTavilyKey] = useState("");
+  const [tavilyBusy, setTavilyBusy] = useState(false);
 
-  const refresh = () => api.settings().then(setSettings).catch(() => {});
+  const refresh = () =>
+    Promise.all([api.settings(), api.tavilyStatus()])
+      .then(([nextSettings, nextTavily]) => {
+        setSettings(nextSettings);
+        setTavily(nextTavily);
+      })
+      .catch(() => {});
   useEffect(() => {
     refresh();
   }, []);
@@ -73,6 +82,32 @@ export default function SettingsModal({ onClose }: { onClose: () => void }) {
     refresh();
   }
 
+  async function configureTavily() {
+    if (!tavilyKey.trim()) {
+      setMsg("请先填写 Tavily API Key");
+      return;
+    }
+    setTavilyBusy(true);
+    setMsg("");
+    const result = await api
+      .configureTavily(tavilyKey.trim())
+      .catch((error) => ({ ok: false, message: String(error) }));
+    setMsg(result.message);
+    if (result.ok) setTavilyKey("");
+    setTavilyBusy(false);
+    refresh();
+  }
+
+  async function removeTavily() {
+    setTavilyBusy(true);
+    const result = await api
+      .removeTavily()
+      .catch((error) => ({ ok: false, message: String(error) }));
+    setMsg(result.message);
+    setTavilyBusy(false);
+    refresh();
+  }
+
   return (
     <div className="modal-mask" onClick={onClose}>
       <div className="modal" onClick={(e) => e.stopPropagation()}>
@@ -83,6 +118,42 @@ export default function SettingsModal({ onClose }: { onClose: () => void }) {
           </button>
         </div>
         <div className="modal-body">
+          <h3>联网检索</h3>
+          <div className="web-config">
+            <div className="web-config-copy">
+              <b>{tavily?.configured ? "Tavily 已配置" : "Tavily 尚未配置"}</b>
+              <span>
+                {tavily?.configured
+                  ? `WebSearchTool 与 WebFetchTool 全局可用 · 来源：${tavily.source === "env" ? "环境变量" : "系统凭据"}`
+                  : "配置后可搜索网页并读取正文；新用户可先免费创建 Tavily Key。"}
+              </span>
+            </div>
+            <a className="web-key-link" href="https://app.tavily.com/home" target="_blank" rel="noreferrer">
+              获取 API Key ↗
+            </a>
+            <div className="web-key-form">
+              <input
+                type="password"
+                placeholder={tavily?.configured ? "输入新 Key 可替换当前配置" : "粘贴 tvly- 开头的 API Key"}
+                value={tavilyKey}
+                onChange={(event) => setTavilyKey(event.target.value)}
+              />
+              <button className="btn-dark" onClick={configureTavily} disabled={tavilyBusy}>
+                {tavilyBusy ? "验证中…" : "一键配置"}
+              </button>
+              {tavily?.configured && tavily.source === "keyring" && (
+                <button className="btn-ghost" onClick={removeTavily} disabled={tavilyBusy}>
+                  移除
+                </button>
+              )}
+            </div>
+            <div className="form-msg">
+              {tavily?.source === "env"
+                ? "当前 Key 来自环境变量，优先级高于应用内配置。"
+                : "Key 只保存在系统凭据中，不会写入设置 JSON。"}
+            </div>
+          </div>
+
           <h3>模型供应商</h3>
           <div className="provider-list">
             {settings?.providers.map((p) => (

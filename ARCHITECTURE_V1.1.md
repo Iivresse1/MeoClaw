@@ -8,6 +8,7 @@ LangChain 1.x while preserving MeoClaw's differentiation:
 - an explicit planner, implementation agent, read-only verifier and final node;
 - fail-closed verification based on commands plus model inspection;
 - one canonical message timeline shared across nodes and tasks;
+- Tavily web search and page fetching available in interactive modes and role agents;
 - persistent checkpoints and resumable human approvals through SQLite;
 - Docker-isolated shell execution.
 
@@ -16,6 +17,7 @@ LangChain 1.x while preserving MeoClaw's differentiation:
 ```text
 React/Electron
   -> authenticated REST + WebSocket Bridge
+  -> Tavily WebSearch / WebFetch (API key in keyring)
   -> LangGraph role graph
        planner
          -> implementation create_agent
@@ -43,6 +45,14 @@ existing WebSocket event contract.
 
 Infrastructure failures are not swallowed. The stack replaces only
 tool-execution exception handling.
+
+## Web Access
+
+`WebSearchTool` and `WebFetchTool` are read-only tools registered globally for
+chat, workspace, system, verifier, codeAgent and searchAgent loops. The Tavily
+key is resolved from `TAVILY_API_KEY` first and from the OS keyring second.
+The settings API validates a candidate key before storing it; keys are never
+returned by the status endpoint or written to settings JSON.
 
 ## ContextBuilder
 
@@ -94,6 +104,10 @@ Runtime defaults:
 - only the session workspace is a persistent writable mount;
 - container removed after the shell session exits.
 
+Verifier commands use the same Docker policy as the actor shell, but each
+command runs in a one-shot container so a model-generated check never falls
+back to a host subprocess.
+
 Set `MEOCLAW_SANDBOX_NETWORK=1` only for an explicitly approved task that needs
 network access.
 
@@ -101,4 +115,7 @@ network access.
 
 The obsolete 1.0 manual context monitor/compressor has been removed. Version 1.1
 uses `SummarizationMiddleware` for in-agent context compression and
-`ContextBuilder` for role-specific context projection.
+`ContextBuilder` for role-specific context projection. When a task reaches the
+`final` node, the runtime appends a bounded, deterministic task summary to
+`HISTORY_SUMMARY.md`; later tasks and process restarts read it back through
+`ContextBuilder`.

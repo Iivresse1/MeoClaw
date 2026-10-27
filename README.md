@@ -1,6 +1,6 @@
 # MeoClaw
 
-MeoClaw 是一个本地桌面的 AI 助理：支持纯对话、工作区文件任务和系统工具（截图/剪贴板/打开链接）三类模式。1.1 分支使用 LangChain `create_agent` 与 middleware 管理 ReAct 循环、工具错误、调用预算、上下文摘要和人工审批，并通过 SQLite checkpoint 持久化会话。
+MeoClaw 是一个本地桌面的 AI 助理：支持纯对话、工作区文件任务和系统工具（截图/剪贴板/打开链接）三类模式。所有可执行工具的 Agent 模式都支持 Tavily 网络搜索与网页正文读取；1.1 分支使用 LangChain `create_agent` 与 middleware 管理 ReAct 循环、工具错误、调用预算、上下文摘要和人工审批，并通过 SQLite checkpoint 持久化会话。
 
 ## 项目整体架构
 
@@ -54,13 +54,14 @@ MeoClaw 是一个本地桌面的 AI 助理：支持纯对话、工作区文件�
 | `GET/POST /api/settings` | 读写 `temperature / max_attempts / permission / sidebar_open` |
 | `POST /api/providers`、`DELETE /api/providers/{name}`、`POST /api/providers/active` | CC Switch 式供应商管理 |
 | `POST /api/test-connection` | 用表单参数（或已存密钥）试调模型 |
+| `GET/POST/DELETE /api/tavily` | 查询、验证并保存 Tavily API Key（只保存在系统凭据中） |
 | `POST /api/task` | 启动任务，返回 `{task_id, session_id}` |
 | `POST /api/approval/{aid}` | 审批放行/拒绝 |
 | `WS /ws/task/{tid}` | 推送 runner 事件流，`ui_done` 收尾 |
 
 - `runner.start(...)`：启动后台任务并把 LangChain/LangGraph 原生事件写入队列；`workspace` 驱动角色图，`system` 驱动带 HITL middleware 的 Agent
 - `runner.resume_approval(...)`：审批后使用 `Command(resume=...)` 恢复 SQLite checkpoint 中的任务
-- `system_tools`：`TakeScreenshot / ClipboardRead / ClipboardWrite / OpenUrl / OpenWorkspaceFile`，路径经 `resolve_in_workspace` 安检，越界直接拒绝
+- `system_tools`：`WebSearchTool / WebFetchTool` + `TakeScreenshot / ClipboardRead / ClipboardWrite / OpenUrl / OpenWorkspaceFile`，路径经 `resolve_in_workspace` 安检，越界直接拒绝
 - `store`：会话仅在首条消息时落库，标题取首条消息前 60 字
 
 ### 前端（desktop/src）
@@ -157,7 +158,7 @@ npm run build
 npm start
 ```
 
-启动后打开应用「设置」，填写供应商名称、模型名、Base URL 和 API Key。Agent 的文本、计划、工具调用、验证命令和审批请求会通过 WebSocket 实时更新。
+启动后打开应用「设置」，填写供应商名称、模型名、Base URL 和 API Key。新用户可在「设置 → 联网检索」中打开 Tavily 控制台创建 Key，粘贴后点击「一键配置」；应用会先验证连接，再存入系统凭据。Agent 的文本、计划、工具调用、验证命令和审批请求会通过 WebSocket 实时更新。
 
 如果可正常访问 Docker Hub、Debian 和 PyPI 官方源，也可以改用默认构建：
 
@@ -231,6 +232,11 @@ npm install
 `active_provider` 一键切换当前供应商；密钥存 keyring（服务名 `MeoClawDesktop`，
 键名 `provider:{名称}`），不可用时降级 `%APPDATA%\MeoClawDesktop\.secrets.json`。
 
+**Tavily 联网检索**：在设置页粘贴 Tavily API Key 并点击「一键配置」。Key 以
+`tavily:api_key` 存入系统凭据，不会写入 `settings.json`。环境变量
+`TAVILY_API_KEY` 优先级最高，适合 CLI 或自动化环境。配置完成后，
+`WebSearchTool` 与 `WebFetchTool` 在 chat、workspace、system 和专家 Agent 中可用。
+
 **`%APPDATA%\MeoClawDesktop\settings.json`**：
 
 | 字段 | 默认 | 说明 |
@@ -254,9 +260,9 @@ npm install
 
 | 下拉文案 | 内部值 | 行为 |
 | --- | --- | --- |
-| 仅对话 | `chat` | 直连模型流式对话，携带会话历史 |
-| 在工作区内修改 | `workspace`（默认） | planner→implementation→verifier→final；shell 在 Docker 中执行，Docker 不可用时 fail-closed |
-| 系统工具（需批准） | `system` | `create_agent` + 5 个系统工具；敏感调用经 `HumanInTheLoopMiddleware` 中断，用户决定后恢复 |
+| 仅对话 | `chat` | `create_agent` + WebSearch/WebFetch；携带会话历史，不访问工作区 |
+| 在工作区内修改 | `workspace`（默认） | planner→implementation→verifier→final；含 WebSearch/WebFetch，shell 在 Docker 中执行，Docker 不可用时 fail-closed |
+| 系统工具（需批准） | `system` | `create_agent` + WebSearch/WebFetch + 5 个系统工具；敏感调用经 `HumanInTheLoopMiddleware` 中断，用户决定后恢复 |
 
 ## 测试
 

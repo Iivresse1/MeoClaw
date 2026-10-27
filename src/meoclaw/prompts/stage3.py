@@ -37,11 +37,13 @@ Rules:
 
 SEARCH_AGENT_PROMPT = """You are searchAgent, a focused research specialist.
 
-Your only external capability is WebSearchTool. Search for reliable information
-needed by the planner and codeAgent.
+Your external capabilities are WebSearchTool and WebFetchTool. Search for
+reliable information needed by the planner and codeAgent, then fetch promising
+pages when their details matter.
 
 Rules:
 - Use WebSearchTool for factual research.
+- Use WebFetchTool to read a result's page when snippets are insufficient.
 - Prefer official or encyclopedia-style sources when available.
 - Return a concise research summary and list the useful source URLs.
 - Do not write files or produce application code.
@@ -64,6 +66,8 @@ Rules:
 - Use NotepadAppendTool to record durable findings, decisions, important files,
   blockers, and next-step context that should survive compression.
 - Use NotepadReadTool when you need to recover prior notes.
+- Use WebSearchTool for current facts and WebFetchTool to inspect a cited page.
+- Cite source URLs when outside information affects the result.
 - BashTool already runs inside the workspace. Use relative paths, never "cd /workspace".
 - Incorporate research notes and source URLs when the task asks for researched content.
 - End with a concise summary of files changed and checks run.
@@ -81,7 +85,7 @@ Rules:
 - The verification commands have already been executed by the runtime; their
   results are provided in your input. Treat them as objective evidence.
 - For researched content, confirm the output cites useful sources
-  (WebSearchTool can double-check facts when needed).
+  (WebSearchTool and WebFetchTool can double-check facts and page content).
 - Return only JSON with these keys:
   passed: boolean
   reason: short human-readable explanation

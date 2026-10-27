@@ -14,10 +14,17 @@ import signal
 import subprocess
 import time
 from typing import Any, TypedDict
+from uuid import uuid4
 
 from langchain_core.tools import StructuredTool, ToolException
 from pydantic import BaseModel, Field
 
+from meoclaw.core.sandbox import (
+    SandboxUnavailableError,
+    build_sandboxed_command,
+    remove_sandbox_container,
+    sandbox_mode,
+)
 from meoclaw.core.state import RuntimeState
 
 __all__ = [
@@ -102,10 +109,9 @@ def _decode(data: bytes | None) -> str:
     if not data:
         return ""
     encodings = ["utf-8"]
-    try:
-        encodings.append(locale.getpreferredencoding(False))
-    except Exception:  # pragma: no cover - 极端环境
-        pass
+    preferred = locale.getpreferredencoding(False)
+    if preferred:
+        encodings.append(preferred)
     encodings.extend(["gbk", "latin-1"])
     for encoding in encodings:
         if not encoding:
@@ -166,12 +172,30 @@ def execute_command(
     command = command.strip()
     timeout = _positive_int(timeout_seconds, "timeout_seconds", state.bash_timeout_seconds)
 
-    popen_kwargs: dict[str, Any] = {
-        "cwd": str(state.workspace),
-        "shell": True,
-        "stdout": subprocess.PIPE,
-        "stderr": subprocess.PIPE,
-    }
+    use_docker = sandbox_mode(state) == "docker"
+    container_name = f"meoclaw-verify-{uuid4().hex}" if use_docker else ""
+    if use_docker:
+        try:
+            popen_command: str | list[str] = build_sandboxed_command(
+                state,
+                command,
+                container_name=container_name,
+            )
+        except SandboxUnavailableError as exc:
+            raise ToolException(str(exc)) from exc
+        popen_kwargs: dict[str, Any] = {
+            "shell": False,
+            "stdout": subprocess.PIPE,
+            "stderr": subprocess.PIPE,
+        }
+    else:
+        popen_command = command
+        popen_kwargs = {
+            "cwd": str(state.workspace),
+            "shell": True,
+            "stdout": subprocess.PIPE,
+            "stderr": subprocess.PIPE,
+        }
     if os.name == "nt":
         # 独立进程组，便于超时后 taskkill /T 收掉整棵树
         popen_kwargs["creationflags"] = subprocess.CREATE_NEW_PROCESS_GROUP
@@ -180,18 +204,25 @@ def execute_command(
 
     started = time.perf_counter()
     try:
-        proc: subprocess.Popen[bytes] = subprocess.Popen(command, **popen_kwargs)
+        proc: subprocess.Popen[bytes] = subprocess.Popen(popen_command, **popen_kwargs)
     except OSError as exc:
         raise ToolException(f"无法启动命令: {exc}") from exc
 
     timed_out = False
     try:
-        stdout_bytes, stderr_bytes = proc.communicate(timeout=timeout)
-    except subprocess.TimeoutExpired:
-        timed_out = True
-        _kill_process_tree(proc)
-        # 进程已被终止，这里只是回收残余输出（有上限，不会无限等待）
-        stdout_bytes, stderr_bytes = _drain_output(proc)
+        try:
+            stdout_bytes, stderr_bytes = proc.communicate(timeout=timeout)
+        except subprocess.TimeoutExpired:
+            timed_out = True
+            _kill_process_tree(proc)
+            # 进程已被终止，这里只是回收残余输出（有上限，不会无限等待）
+            stdout_bytes, stderr_bytes = _drain_output(proc)
+        except BaseException:
+            _kill_process_tree(proc)
+            raise
+    finally:
+        if use_docker and (timed_out or proc.poll() is None):
+            remove_sandbox_container(container_name)
 
     elapsed = time.perf_counter() - started
     exit_code = proc.returncode

@@ -17,6 +17,7 @@ FALLBACK_SECRETS = BASE / ".secrets.json"
 BRIDGE_TOKEN_FILE = BASE / "bridge_token"
 CHECKPOINTS_DB = BASE / "checkpoints.sqlite"
 SESSION_ID_RE = re.compile(r"^[a-f0-9]{12}$")
+TAVILY_SECRET_NAME = "tavily:api_key"
 
 DEFAULTS = {
     "temperature": 0.0,
@@ -97,6 +98,25 @@ def get_active_provider(settings: dict | None = None) -> dict | None:
             out["api_key"] = get_secret(provider_key(active))
             return out
     return None
+
+
+def tavily_key_status() -> tuple[str, str]:
+    """Return ``(key, source)`` without exposing the key through the API."""
+    configured = (os.environ.get("TAVILY_API_KEY") or "").strip()
+    if configured:
+        return configured, "env"
+    stored = (get_secret(TAVILY_SECRET_NAME) or "").strip()
+    return (stored, "keyring") if stored else ("", "")
+
+
+def get_tavily_api_key() -> str:
+    return tavily_key_status()[0]
+
+
+def set_tavily_api_key(value: str) -> None:
+    """Persist the setup key in the OS keyring with the existing fallback."""
+    key = (value or "").strip()
+    set_secret(TAVILY_SECRET_NAME, key)
 
 
 def session_workspace(session_id: str) -> Path:

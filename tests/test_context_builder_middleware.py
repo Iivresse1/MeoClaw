@@ -26,6 +26,7 @@ from meoclaw.core.middleware import build_agent_middleware
 from meoclaw.core.react import stream_react_events
 from meoclaw.core.sandbox import SandboxUnavailableError, build_sandbox_shell_middleware
 from meoclaw.core.state import RuntimeState
+from meoclaw.graph.memory import HISTORY_SUMMARY_FILENAME
 from meoclaw.graph.workflow import build_workflow, initial_state
 
 
@@ -228,8 +229,10 @@ def test_same_session_second_task_reuses_message_timeline(tmp_path: Path) -> Non
     graph = build_workflow(checkpointer=saver)
     config = {"configurable": {"thread_id": "shared-session"}}
 
+    models: list[ScriptedModel] = []
+
     def model_for(summary: str) -> ScriptedModel:
-        return ScriptedModel(
+        model = ScriptedModel(
             [
                 _plan(),
                 AIMessage(content="完成"),
@@ -246,6 +249,8 @@ def test_same_session_second_task_reuses_message_timeline(tmp_path: Path) -> Non
                 AIMessage(content=summary),
             ]
         )
+        models.append(model)
+        return model
 
     runtime1 = RuntimeState(workspace=tmp_path / "timeline-ws")
     state1 = initial_state(
@@ -271,6 +276,18 @@ def test_same_session_second_task_reuses_message_timeline(tmp_path: Path) -> Non
     assert "第二个任务" in contents
     assert "总结一" in contents
     assert "总结二" in contents
+
+    history = (
+        runtime1.workspace / HISTORY_SUMMARY_FILENAME
+    ).read_text(encoding="utf-8")
+    assert "第一个任务" in history
+    assert "第二个任务" in history
+
+    second_task_input = "\n".join(
+        str(message.content) for call in models[1].calls for message in call
+    )
+    assert "第一个任务" in second_task_input
+    assert "- Outcome: PASSED" in second_task_input
     conn.close()
 
 

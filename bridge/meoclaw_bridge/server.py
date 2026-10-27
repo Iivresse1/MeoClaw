@@ -99,6 +99,10 @@ class TestReq(BaseModel):
     api_key: str = ""                # 留空则读取该供应商已存密钥
 
 
+class TavilyReq(BaseModel):
+    api_key: str
+
+
 @app.get("/api/health")
 def health():
     sandbox = os.environ.get("MEOCLAW_SANDBOX", "docker").lower()
@@ -192,6 +196,42 @@ def test_conn(req: TestReq):
         return {"ok": True, "message": f"连接成功：{str(getattr(r, 'content', r))[:60]}"}
     except Exception as e:
         return {"ok": False, "message": f"连接失败：{type(e).__name__}: {e}"[:200]}
+
+
+@app.get("/api/tavily")
+def tavily_status():
+    key, source = config.tavily_key_status()
+    return {"ok": True, "configured": bool(key), "source": source}
+
+
+@app.post("/api/tavily")
+def configure_tavily(req: TavilyReq):
+    key = (req.api_key or "").strip()
+    if not key:
+        return {"ok": False, "message": "Tavily API Key 不能为空"}
+
+    from meoclaw.tools.web_search_tool import web_search
+
+    result = web_search(
+        "Tavily connectivity check",
+        max_results=1,
+        include_answer=False,
+        api_key=key,
+    )
+    if result.get("ok") is not True:
+        return {
+            "ok": False,
+            "message": f"连接失败：{result.get('error') or '未知错误'}"[:300],
+        }
+
+    config.set_tavily_api_key(key)
+    return {"ok": True, "message": "Tavily 已配置并通过连接测试"}
+
+
+@app.delete("/api/tavily")
+def remove_tavily():
+    config.set_tavily_api_key("")
+    return {"ok": True, "message": "Tavily API Key 已移除"}
 
 
 @app.post("/api/task")

@@ -12,11 +12,17 @@ import queue
 import threading
 from typing import Any
 
+from .. import config
 from . import model_factory, system_tools
 
-CHAT_SYSTEM_PROMPT = "你是一位简洁可靠的中文桌面助理。"
+CHAT_SYSTEM_PROMPT = (
+    "你是一位简洁可靠的中文桌面助理。"
+    "需要最新信息时可以使用 WebSearchTool 搜索，并用 WebFetchTool 读取网页正文。"
+    "回答引用网页资料时应说明来源。"
+)
 SYSTEM_PROMPT = (
-    "你是我的桌面助理，可以调用系统工具（截图/剪贴板/打开链接与工作区文件）。"
+    "你是我的桌面助理，可以联网搜索和读取网页，也可以调用系统工具"
+    "（截图/剪贴板/打开链接与工作区文件）。"
     "敏感操作会由 LangChain 中断并要求用户批准；被拒绝时不要重试。"
     "回答保持简洁、中文。"
 )
@@ -147,24 +153,28 @@ def _worker(
     }
     paused = False
     try:
-        model = model_factory.build_model(settings)
-        if mode == "chat" and resume is None:
-            _run_chat(q, model, task, history)
-        elif mode == "workspace":
-            _run_agent(
-                q, model, task, settings, session_ws, task_id, session_id, checkpointer
-            )
-        else:
-            paused = _run_tools(
-                q,
-                model,
-                task,
-                session_ws,
-                task_id,
-                session_id,
-                checkpointer,
-                resume,
-            )
+        tavily_key = config.get_tavily_api_key()
+        from meoclaw.tools.web_access import tavily_api_key_scope
+
+        with tavily_api_key_scope(tavily_key):
+            model = model_factory.build_model(settings)
+            if mode == "chat" and resume is None:
+                _run_chat(q, model, task, history, session_ws, task_id, session_id)
+            elif mode == "workspace":
+                _run_agent(
+                    q, model, task, settings, session_ws, task_id, session_id, checkpointer
+                )
+            else:
+                paused = _run_tools(
+                    q,
+                    model,
+                    task,
+                    session_ws,
+                    task_id,
+                    session_id,
+                    checkpointer,
+                    resume,
+                )
     except Exception as exc:  # noqa: BLE001 - worker boundary must forward every failure
         q.put({"type": "error", "message": f"{type(exc).__name__}: {exc}"[:300]})
     finally:
@@ -174,23 +184,39 @@ def _worker(
             q.put({"type": "ui_done"})
 
 
-def _run_chat(q, model, task, history):
-    from langchain_core.messages import AIMessage, HumanMessage, SystemMessage
+def _run_chat(q, model, task, history, session_ws, task_id, session_id):
+    from langchain_core.messages import AIMessage, HumanMessage
 
-    msgs = [SystemMessage(content=CHAT_SYSTEM_PROMPT)]
+    from meoclaw.core.react import stream_react_events
+    from meoclaw.core.state import RuntimeState
+    from meoclaw.tools.registry import build_web_tools
+
+    msgs = []
     for role, content in history or []:
         if role == "user":
             msgs.append(HumanMessage(content=content))
         elif role == "assistant":
             msgs.append(AIMessage(content=content))
     msgs.append(HumanMessage(content=task))
-    full: list[str] = []
-    for chunk in model.stream(msgs):
-        text = getattr(chunk, "content", "") or ""
-        if text:
-            full.append(text)
-            q.put({"type": "ai_token", "content": text})
-    q.put({"type": "final_answer", "content": "".join(full), "node": "chat"})
+
+    runtime = RuntimeState(workspace=session_ws)
+    runtime.metadata.update(
+        {"task_id": task_id, "thread_id": task_id, "session_id": session_id}
+    )
+    for event in stream_react_events(
+        task,
+        runtime=runtime,
+        model=model,
+        tools=build_web_tools(),
+        max_loops=6,
+        system_prompt=CHAT_SYSTEM_PROMPT,
+        input_messages=msgs,
+        role="chat",
+        task_id=task_id,
+        stream_tokens=True,
+    ):
+        event.setdefault("node", "chat")
+        q.put(event)
 
 
 def _run_agent(

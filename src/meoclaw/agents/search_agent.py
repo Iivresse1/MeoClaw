@@ -8,7 +8,7 @@
 内部复用底层 ReAct 循环（`core.react.stream_react_events`），所以 tool_call_id 配对、
 工具失败降级成 `ok=False` 这些行为与 codeAgent 完全一致。与 codeAgent 的区别：
 
-- 系统提示词是 `SEARCH_AGENT_PROMPT`，唯一的外部能力是 `WebSearchTool`；
+- 系统提示词是 `SEARCH_AGENT_PROMPT`，外部能力是 `WebSearchTool` + `WebFetchTool`；
 - 不绑定任何会改工作区的工具（写文件/编辑/命令都不给它）；
 - 收尾时从检索事件里汇总 `queries` 与去重后的 `sources`（只保留 title/url）。
 
@@ -30,6 +30,7 @@ from meoclaw.core.react import stream_react_events
 from meoclaw.core.state import RuntimeState
 from meoclaw.graph.memory import build_layered_memory, format_layered_memory_for_prompt
 from meoclaw.prompts.stage3 import SEARCH_AGENT_PROMPT
+from meoclaw.tools.web_fetch_tool import WEB_FETCH_TOOL_NAME, build_web_fetch_tool
 from meoclaw.tools.web_search_tool import WEB_SEARCH_TOOL_NAME, build_web_search_tool
 
 __all__ = [
@@ -49,8 +50,8 @@ MAX_SOURCES = 12
 
 
 def build_search_agent_tools() -> list:
-    """searchAgent 的工具集：只有 WebSearchTool（检索专家只检索）。"""
-    return [build_web_search_tool()]
+    """searchAgent 的工具集：检索与读取网页，不允许修改本地工作区。"""
+    return [build_web_search_tool(), build_web_fetch_tool()]
 
 
 def compose_search_message(
@@ -181,6 +182,12 @@ def run_search_agent(
                             "url": url,
                         }
                     )
+        elif kind == "tool_result" and event.get("name") == WEB_FETCH_TOOL_NAME:
+            result = event.get("result")
+            if isinstance(result, Mapping) and result.get("ok") is True:
+                url = str(result.get("url") or "").strip()
+                if url and not any(source["url"] == url for source in sources):
+                    sources.append({"title": url, "url": url})
         elif kind == "final_answer":
             summary = str(event.get("content") or "")
             stopped_reason = str(event.get("stopped_reason") or "")

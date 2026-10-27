@@ -11,6 +11,8 @@ def build_system_tools(workspace: Path) -> list:
     from langchain_core.tools import StructuredTool
     from pydantic import BaseModel, Field
 
+    from meoclaw.tools.registry import build_web_tools
+
     class UrlArgs(BaseModel):
         url: str = Field(description="要打开的 http(s) 链接")
 
@@ -62,6 +64,7 @@ def build_system_tools(workspace: Path) -> list:
         return f"已打开 {real.name}"
 
     return [
+        *build_web_tools(),
         StructuredTool.from_function(take_screenshot, name="TakeScreenshot",
                                       description="截取全屏保存到会话工作区并返回文件名"),
         StructuredTool.from_function(clipboard_read, name="ClipboardRead",

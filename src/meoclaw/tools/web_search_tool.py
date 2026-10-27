@@ -15,13 +15,12 @@
 
 from __future__ import annotations
 
-import os
 from typing import Any
 
 from langchain_core.tools import StructuredTool, ToolException
 from pydantic import BaseModel, Field
 
-from meoclaw.providers.openai_provider import load_env
+from meoclaw.tools.web_access import resolve_tavily_api_key
 
 __all__ = [
     "MAX_RESULTS_LIMIT",
@@ -57,7 +56,13 @@ class WebSearchInput(BaseModel):
     )
 
 
-def web_search(query: str, max_results: int = 5, include_answer: bool = True) -> dict[str, Any]:
+def web_search(
+    query: str,
+    max_results: int = 5,
+    include_answer: bool = True,
+    *,
+    api_key: str | None = None,
+) -> dict[str, Any]:
     """用 Tavily 检索，返回 `{ok, query, answer, results}` 结构化结果。
 
     Args:
@@ -73,9 +78,8 @@ def web_search(query: str, max_results: int = 5, include_answer: bool = True) ->
     if not query:
         return {"ok": False, "query": "", "error": "query 不能为空"}
 
-    load_env()
-    api_key = os.getenv("TAVILY_API_KEY")
-    if not api_key:
+    resolved_key = resolve_tavily_api_key(api_key)
+    if not resolved_key:
         return {
             "ok": False,
             "query": query,
@@ -97,7 +101,7 @@ def web_search(query: str, max_results: int = 5, include_answer: bool = True) ->
         limit = 5
 
     try:
-        client = TavilyClient(api_key=api_key)
+        client = TavilyClient(api_key=resolved_key)
         response = client.search(
             query=query,
             search_depth="basic",
@@ -129,13 +133,19 @@ def web_search(query: str, max_results: int = 5, include_answer: bool = True) ->
     }
 
 
-def build_web_search_tool() -> StructuredTool:
+def build_web_search_tool(api_key: str | None = None) -> StructuredTool:
     """构造 WebSearchTool（无状态，不需要绑定 RuntimeState）。"""
 
     def web_search_tool(
         query: str, max_results: int = 5, include_answer: bool = True
     ) -> dict[str, Any]:
-        result = web_search(query, max_results=max_results, include_answer=include_answer)
+        kwargs: dict[str, Any] = {
+            "max_results": max_results,
+            "include_answer": include_answer,
+        }
+        if api_key:
+            kwargs["api_key"] = api_key
+        result = web_search(query, **kwargs)
         if result.get("ok") is False and _is_retryable_search_error(
             str(result.get("error") or "")
         ):

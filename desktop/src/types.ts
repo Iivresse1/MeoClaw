@@ -31,7 +31,7 @@ export const MODE_LABELS: Record<string, string> = {
 };
 
 export const MODE_HINTS: Record<string, string> = {
-  chat: "只使用模型，不访问工作区或系统工具",
+  chat: "模型对话，可联网搜索和读取网页",
   workspace: "在隔离会话工作区内读取、修改和验证文件",
-  system: "允许调用需要审批的桌面系统工具",
+  system: "可联网，并允许调用需要审批的桌面系统工具",
 };

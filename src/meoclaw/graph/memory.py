@@ -38,6 +38,7 @@ __all__ = [
     "read_history_summary",
     "read_notepad",
     "short_text",
+    "summarize_task_for_history",
     "trim_handoffs",
 ]
 
@@ -165,11 +166,15 @@ def append_history_summary(
     content: str,
     *,
     heading: str = "History",
+    entry_id: str = "",
 ) -> str | None:
     """把一段压缩历史追加到 `HISTORY_SUMMARY.md`（运行时压缩步骤调用）。
 
     文件超过 `state.max_read_bytes` 时只保留最新的一段（旧历史被裁掉），
     保证它不会无限膨胀。写失败返回 None，不抛异常。
+
+    `entry_id` 用于恢复执行时去重：同一个任务即使重复进入 final 节点，
+    也只会在 `HISTORY_SUMMARY.md` 中留下一个条目。
     """
     content = (content or "").strip()
     if not content:
@@ -180,11 +185,18 @@ def append_history_summary(
         existing = ""
         if path.is_file():
             existing = path.read_text(encoding="utf-8", errors="replace")
+        marker = ""
+        if entry_id.strip():
+            safe_id = entry_id.strip()[:100].replace("\n", " ").replace("\r", " ")
+            marker = f"<!-- history-entry:{safe_id} -->"
+            if marker in existing:
+                return state.display(path)
         if not existing.strip():
             existing = "# HISTORY SUMMARY\n"
 
         stamp = datetime.now().strftime("%Y-%m-%d %H:%M:%S")
-        block = f"\n\n## {heading} ({stamp})\n\n{content}\n"
+        marker_line = f"\n{marker}" if marker else ""
+        block = f"\n\n## {heading} ({stamp})\n{marker_line}\n\n{content}\n"
 
         if len(existing) + len(block) > state.max_read_bytes:
             # 超限时：最新一段完整保留，旧历史按剩余预算保留尾部
@@ -199,6 +211,51 @@ def append_history_summary(
     except Exception:  # noqa: BLE001 - 持久化是尽力而为
         return None
     return state.display(path)
+
+
+def summarize_task_for_history(state: Mapping[str, Any]) -> str:
+    """把一次已结束任务的权威状态压成一段可跨任务复用的短摘要。
+
+    该函数不读取原始消息或工具输出，也不调用模型。它只摘取任务、计划、
+    执行结论、验收结果和最终失败信息，避免长期记忆被聊天记录淹没。
+    """
+    passed = bool(state.get("passed"))
+    attempts = _as_int(state.get("attempts"), 0)
+    max_attempts = _as_int(state.get("max_attempts"), 0)
+    command_results = [
+        item for item in (state.get("verification_results") or []) if isinstance(item, Mapping)
+    ]
+
+    lines = [
+        f"- Outcome: {'PASSED' if passed else 'FAILED'}",
+        f"- Attempts: {attempts}/{max_attempts or '?'}",
+        f"- Task: {_short_text(state.get('task'), 500)}",
+    ]
+    plan_summary = _short_text(state.get("plan_summary"), 500)
+    if plan_summary:
+        lines.append(f"- Plan: {plan_summary}")
+
+    execution_summary = _short_text(state.get("last_actor_summary"), 800)
+    if execution_summary:
+        lines.append(f"- Execution: {execution_summary}")
+
+    if command_results:
+        passed_commands = sum(bool(item.get("ok")) for item in command_results)
+        lines.append(
+            f"- Verification commands: {passed_commands}/{len(command_results)} passed"
+        )
+    else:
+        lines.append("- Verification commands: none")
+
+    last_error = _short_text(state.get("last_error"), 700)
+    if not passed and last_error:
+        lines.append(f"- Failure: {last_error}")
+
+    next_instruction = _short_text(state.get("next_instruction"), 400)
+    if next_instruction:
+        lines.append(f"- Next: {next_instruction}")
+
+    return "\n".join(lines)
 
 
 # --------------------------------------------------------------------------- #

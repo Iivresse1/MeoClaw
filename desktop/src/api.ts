@@ -39,6 +39,12 @@ export interface Settings {
   sidebar_open: boolean;
 }
 
+export interface TavilyStatus {
+  ok: boolean;
+  configured: boolean;
+  source: "env" | "keyring" | "";
+}
+
 async function j<T>(path: string, opts: RequestInit = {}): Promise<T> {
   const r = await fetch(BASE + path, {
     headers: {
@@ -66,6 +72,14 @@ export const api = {
     j("/api/providers/active", { method: "POST", body: JSON.stringify({ name }) }),
   testConnection: (p: { name: string; model: string; base_url: string; api_key?: string }) =>
     j<{ ok: boolean; message: string }>("/api/test-connection", { method: "POST", body: JSON.stringify(p) }),
+  tavilyStatus: () => j<TavilyStatus>("/api/tavily"),
+  configureTavily: (api_key: string) =>
+    j<{ ok: boolean; message: string }>("/api/tavily", {
+      method: "POST",
+      body: JSON.stringify({ api_key }),
+    }),
+  removeTavily: () =>
+    j<{ ok: boolean; message: string }>("/api/tavily", { method: "DELETE" }),
   startTask: (body: { task: string; mode: string; session_id?: string | null }) =>
     j<{ ok: boolean; message?: string; task_id?: string; session_id?: string }>(
       "/api/task",

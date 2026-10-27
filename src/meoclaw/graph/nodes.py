@@ -50,6 +50,7 @@ from meoclaw.core.react import (
 )
 from meoclaw.core.sandbox import build_sandbox_shell_middleware, sandbox_mode
 from meoclaw.core.state import RuntimeState
+from meoclaw.graph.memory import append_history_summary, summarize_task_for_history
 from meoclaw.graph.state import MeoGraphState
 from meoclaw.prompts import (
     ACTOR_PROMPT,
@@ -969,6 +970,8 @@ def final_node(
       → `create_model()`），会先用 `FINAL_PROMPT` 让模型写一段面向用户的总结；
       任何异常都回退到确定性文本——收尾失败不该让整张图崩掉。
     - `config["configurable"]["summarize_final"] = False` 可强制只用确定性文本。
+    - 节点退出前由运行时把任务结算摘要追加到 `HISTORY_SUMMARY.md`；
+      下一任务/重启后的 ContextBuilder 会读取它，形成长期记忆闭环。
 
     Returns:
         `final_answer` 与 `passed`（原样透传，便于外层判断退出码）。
@@ -994,6 +997,12 @@ def final_node(
             pass
 
     task_id = str((runtime.metadata or {}).get("task_id") or "")
+    append_history_summary(
+        runtime,
+        summarize_task_for_history(state),
+        heading=f"Task {task_id[:12]}" if task_id else "Task result",
+        entry_id=task_id,
+    )
     final_message = tag_message_context(
         AIMessage(content=report),
         role="final",

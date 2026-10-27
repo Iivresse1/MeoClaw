@@ -12,6 +12,7 @@ from langchain_core.messages import AIMessage, BaseMessage, SystemMessage, ToolM
 from langgraph.graph import END, START, StateGraph
 
 from meoclaw.core.state import RuntimeState
+from meoclaw.graph.memory import HISTORY_SUMMARY_FILENAME
 from meoclaw.graph.nodes import (
     CALL_CODE_AGENT_TOOL,
     CALL_SEARCH_AGENT_TOOL,
@@ -311,6 +312,8 @@ def test_actor_node_binds_todo_update_tool(state: dict[str, Any]) -> None:
         "FileEditTool",
         "GrepTool",
         "BashTool",
+        "WebSearchTool",
+        "WebFetchTool",
         "TodoUpdateTool",
     ]
 
@@ -349,7 +352,13 @@ def test_build_read_only_tools_excludes_writers() -> None:
     from meoclaw.tools.registry import READ_ONLY_TOOL_NAMES
 
     names = list(READ_ONLY_TOOL_NAMES)
-    assert names == ["FileReadTool", "GrepTool", "NotepadReadTool", "WebSearchTool"]
+    assert names == [
+        "FileReadTool",
+        "GrepTool",
+        "NotepadReadTool",
+        "WebSearchTool",
+        "WebFetchTool",
+    ]
     for forbidden in (
         "FileWriteTool",
         "FileEditTool",
@@ -382,9 +391,15 @@ def test_verifier_node_passes(state: dict[str, Any]) -> None:
     assert update["next_instruction"] == ""
     assert update["todos"][0]["status"] == "completed"
     assert [result["ok"] for result in update["verification_results"]] == [True]
-    # 只读工具：能查证，但改不了东西（NotepadReadTool / WebSearchTool 是 VERIFIER_PROMPT 点名的）
+    # 只读工具：能查证，但改不了东西
     assert model.bound_tool_names == [
-        ["FileReadTool", "GrepTool", "NotepadReadTool", "WebSearchTool"]
+        [
+            "FileReadTool",
+            "GrepTool",
+            "NotepadReadTool",
+            "WebSearchTool",
+            "WebFetchTool",
+        ]
     ]
     assert model.calls[0][0].content == VERIFIER_PROMPT
 
@@ -453,6 +468,20 @@ def test_run_verification_commands_collects_results(runtime: RuntimeState) -> No
     ]
 
 
+def test_run_verification_commands_fails_closed_without_docker(
+    runtime: RuntimeState,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    runtime.metadata["sandbox"] = "docker"
+    monkeypatch.setattr("meoclaw.core.sandbox.shutil.which", lambda _: None)
+
+    results = run_verification_commands(runtime, [PASS_COMMAND])
+
+    assert results[0]["ok"] is False
+    assert results[0]["exit_code"] is None
+    assert "Docker 未安装" in results[0]["stderr"]
+
+
 # --------------------------------------------------------------------------- #
 # 路由
 # --------------------------------------------------------------------------- #
@@ -504,6 +533,36 @@ def test_final_node_formats_passed_report(state: dict[str, Any]) -> None:
     assert "写完了" in text
     assert "[OK] content" in text
     assert "exit_code=0 OK" in text
+
+
+def test_final_node_writes_and_deduplicates_task_history(
+    state: dict[str, Any],
+) -> None:
+    state["runtime"].metadata["task_id"] = "task-final-history"
+    state.update(
+        {
+            "plan_summary": "写文件",
+            "passed": True,
+            "attempts": 2,
+            "max_attempts": 3,
+            "last_actor_summary": "修正后写入 hello.txt",
+            "verification_results": [
+                {"command": PASS_COMMAND, "ok": True, "exit_code": 0}
+            ],
+        }
+    )
+
+    final_node(state, {"configurable": {"summarize_final": False}})
+    final_node(state, {"configurable": {"summarize_final": False}})
+
+    history = (
+        state["runtime"].workspace / HISTORY_SUMMARY_FILENAME
+    ).read_text(encoding="utf-8")
+
+    assert history.count("<!-- history-entry:task-final-history -->") == 1
+    assert "- Outcome: PASSED" in history
+    assert "- Attempts: 2/3" in history
+    assert "修正后写入 hello.txt" in history
 
 
 def test_final_node_failed_report_includes_error_and_next_step(state: dict[str, Any]) -> None:

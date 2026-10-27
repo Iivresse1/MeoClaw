@@ -16,6 +16,7 @@ from meoclaw.agents.search_agent import (
 )
 from meoclaw.core.state import RuntimeState
 from meoclaw.prompts.stage3 import SEARCH_AGENT_PROMPT
+from meoclaw.tools.web_fetch_tool import WEB_FETCH_TOOL_NAME
 from meoclaw.tools.web_search_tool import WEB_SEARCH_TOOL_NAME
 
 
@@ -115,10 +116,42 @@ def test_run_search_agent_collects_queries_and_sources(
         "tool_result",
     ]
 
-    # 系统提示词与工具集：检索专家只有 WebSearchTool
+    # 系统提示词与工具集：检索专家可以搜索并读取网页
     assert isinstance(model.calls[0][0], SystemMessage)
     assert model.calls[0][0].content == SEARCH_AGENT_PROMPT
-    assert model.bound_tool_names == [WEB_SEARCH_TOOL_NAME]
+    assert model.bound_tool_names == [WEB_SEARCH_TOOL_NAME, WEB_FETCH_TOOL_NAME]
+
+
+def test_search_agent_records_fetched_page_source(
+    state: dict[str, Any], monkeypatch: pytest.MonkeyPatch
+) -> None:
+    from meoclaw.tools import web_fetch_tool
+
+    monkeypatch.setattr(
+        web_fetch_tool,
+        "web_fetch",
+        lambda url, **kwargs: {
+            "ok": True,
+            "url": url,
+            "content": "official details",
+        },
+    )
+    model = Fake(
+        [
+            tool_call(
+                "WebFetchTool",
+                {"url": "https://example.com/docs"},
+                "f1",
+            ),
+            AIMessage(content="已读取官方文档。"),
+        ]
+    )
+
+    result = run_search_agent(state, "读取官方文档", model=model)
+
+    assert result["sources"] == [
+        {"title": "https://example.com/docs", "url": "https://example.com/docs"}
+    ]
 
 
 def test_search_agent_falls_back_to_answers(state: dict[str, Any], fake_search: None) -> None:
@@ -173,8 +206,11 @@ def test_compose_search_message_contains_all_parts(state: dict[str, Any]) -> Non
     assert "Search as needed" in message
 
 
-def test_build_search_agent_tools_only_contains_web_search() -> None:
-    assert [tool.name for tool in build_search_agent_tools()] == [WEB_SEARCH_TOOL_NAME]
+def test_build_search_agent_tools_exposes_web_search_and_fetch() -> None:
+    assert [tool.name for tool in build_search_agent_tools()] == [
+        WEB_SEARCH_TOOL_NAME,
+        WEB_FETCH_TOOL_NAME,
+    ]
 
 
 def test_run_search_agent_uses_model_from_runtime_metadata(

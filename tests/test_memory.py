@@ -26,6 +26,7 @@ from meoclaw.graph.memory import (
     format_layered_memory_for_prompt,
     read_history_summary,
     read_notepad,
+    summarize_task_for_history,
 )
 from meoclaw.tools.notepad_tool import NOTEPAD_FILENAME, notepad_append
 from meoclaw.tools.todo_tool import TODO_FILENAME
@@ -142,6 +143,27 @@ def test_append_history_summary_rejects_empty(runtime: RuntimeState) -> None:
         append_history_summary(runtime, "   ")
 
 
+def test_append_history_summary_deduplicates_entry_id(runtime: RuntimeState) -> None:
+    append_history_summary(
+        runtime,
+        "同一个任务的结算摘要",
+        heading="Task task-1",
+        entry_id="task-1",
+    )
+    append_history_summary(
+        runtime,
+        "恢复执行时不应重复追加",
+        heading="Task task-1",
+        entry_id="task-1",
+    )
+
+    text = (runtime.workspace / HISTORY_SUMMARY_FILENAME).read_text(encoding="utf-8")
+
+    assert text.count("<!-- history-entry:task-1 -->") == 1
+    assert "同一个任务的结算摘要" in text
+    assert "恢复执行时不应重复追加" not in text
+
+
 def test_append_history_summary_trims_when_too_large(tmp_path: Path) -> None:
     runtime = RuntimeState(workspace=tmp_path / "ws", max_read_bytes=500)
     append_history_summary(runtime, "旧" * 400)
@@ -158,6 +180,31 @@ def test_append_history_summary_trims_when_too_large(tmp_path: Path) -> None:
     assert text.startswith("…（旧历史已裁剪）")
     assert "新" * 100 in text  # 最新的历史保住了
     assert "## Latest" in text
+
+
+def test_summarize_task_for_history_uses_structured_result(state: dict[str, Any]) -> None:
+    state.update(
+        {
+            "passed": False,
+            "attempts": 2,
+            "max_attempts": 3,
+            "last_actor_summary": "修改了 utils.py，但测试失败",
+            "last_error": "AssertionError: add(1, 2) != 3",
+            "next_instruction": "修正 add 的返回值",
+            "verification_results": [
+                {"command": "pytest", "ok": False, "exit_code": 1},
+            ],
+        }
+    )
+
+    summary = summarize_task_for_history(state)
+
+    assert "- Outcome: FAILED" in summary
+    assert "- Attempts: 2/3" in summary
+    assert "修改了 utils.py，但测试失败" in summary
+    assert "- Verification commands: 0/1 passed" in summary
+    assert "AssertionError" in summary
+    assert "修正 add 的返回值" in summary
 
 
 # --------------------------------------------------------------------------- #
