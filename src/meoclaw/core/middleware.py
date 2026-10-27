@@ -22,6 +22,13 @@ from langchain.agents.middleware import (
 from langchain_core.language_models import BaseChatModel
 from langchain_core.messages import ToolMessage
 
+from meoclaw.core.permissions import (
+    AISecurityReviewer,
+    ApprovalHandler,
+    DecisionSink,
+    ToolPermissionMiddleware,
+    normalize_policy,
+)
 from meoclaw.tools.web_search_tool import WEB_SEARCH_TOOL_NAME
 
 __all__ = [
@@ -75,6 +82,9 @@ def build_agent_middleware(
     max_tool_calls: int = 32,
     summary_token_limit: int | None = None,
     approval_tools: Sequence[str] | None = None,
+    permission_policy: str = "full",
+    approval_handler: ApprovalHandler | None = None,
+    decision_sink: DecisionSink | None = None,
 ) -> list[AgentMiddleware]:
     """Build the common middleware stack for one create_agent graph.
 
@@ -102,6 +112,16 @@ def build_agent_middleware(
             exit_behavior="end",
         ),
     ]
+    policy = normalize_policy(permission_policy)
+    if policy != "full":
+        middleware.append(
+            ToolPermissionMiddleware(
+                policy=policy,
+                reviewer=AISecurityReviewer(model) if policy == "ai" else None,
+                approval_handler=approval_handler,
+                decision_sink=decision_sink,
+            )
+        )
     if summary_token_limit is not None and int(summary_token_limit) > 0:
         middleware.append(
             SummarizationMiddleware(

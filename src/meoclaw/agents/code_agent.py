@@ -197,6 +197,9 @@ def run_code_agent(
         input_messages=bundle.messages,
         role="actor",
         task_id=task_id,
+        permission_policy=str(
+            (runtime.metadata or {}).get("permission") or "full"
+        ),
         extra_middleware=extra_middleware,
         message_sink=messages,
         stream_tokens=True,

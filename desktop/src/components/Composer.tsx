@@ -1,20 +1,29 @@
 import { KeyboardEvent } from "react";
-import { MODE_HINTS, MODE_LABELS } from "../types";
+import { PERMISSION_HINTS, PERMISSION_LABELS } from "../types";
 
 interface Props {
   value: string;
   onChange: (v: string) => void;
-  mode: string;
-  onMode: (m: string) => void;
+  permission: string;
+  onPermission: (permission: string) => void;
   running: boolean;
+  locked?: boolean;
   onSend: () => void;
 }
 
-export default function Composer({ value, onChange, mode, onMode, running, onSend }: Props) {
+export default function Composer({
+  value,
+  onChange,
+  permission,
+  onPermission,
+  running,
+  locked = false,
+  onSend,
+}: Props) {
   function onKeyDown(e: KeyboardEvent<HTMLTextAreaElement>) {
     if (e.key === "Enter" && !e.shiftKey) {
       e.preventDefault();
-      if (!running && value.trim()) onSend();
+      if (!running && !locked && value.trim()) onSend();
     }
   }
   return (
@@ -22,21 +31,31 @@ export default function Composer({ value, onChange, mode, onMode, running, onSen
       <textarea
         className="input-box"
         rows={3}
-        placeholder={running ? "MeoClaw 正在执行当前任务…" : "描述任务、粘贴错误，或让 MeoClaw 检查当前项目"}
+        placeholder={
+          locked
+            ? "归档会话仅可查看历史，恢复后才能继续"
+            : running
+              ? "MeoClaw 正在执行当前任务…"
+              : "描述任务、粘贴错误，或让 MeoClaw 检查当前项目"
+        }
+        disabled={locked}
         value={value}
         onChange={(e) => onChange(e.target.value)}
         onKeyDown={onKeyDown}
       />
       <div className="composer-bar">
-        <label className="composer-mode" title={MODE_HINTS[mode] || "执行权限"}>
-          <span className="mode-dot" />
+        <label
+          className="composer-permission"
+          title={PERMISSION_HINTS[permission] || "执行权限"}
+        >
+          <span className="permission-dot" />
           <select
-            className="mode-select"
-            value={mode}
-            onChange={(e) => onMode(e.target.value)}
-            disabled={running}
+            className="permission-select"
+            value={permission}
+            onChange={(e) => onPermission(e.target.value)}
+            disabled={running || locked}
           >
-            {Object.entries(MODE_LABELS).map(([key, label]) => (
+            {Object.entries(PERMISSION_LABELS).map(([key, label]) => (
               <option key={key} value={key}>
                 {label}
               </option>
@@ -46,7 +65,7 @@ export default function Composer({ value, onChange, mode, onMode, running, onSen
         <button
           className="send-btn"
           onClick={onSend}
-          disabled={running || !value.trim()}
+          disabled={running || locked || !value.trim()}
           title="发送"
         >
           <svg viewBox="0 0 20 20" aria-hidden="true">

@@ -60,7 +60,8 @@ from meoclaw.prompts import (
     VERIFIER_PROMPT,
 )
 from meoclaw.tools.bash_tool import execute_command
-from meoclaw.tools.registry import build_read_only_tools, build_tools
+from meoclaw.tools.registry import build_read_only_tools, build_tools, build_web_tools
+from meoclaw.tools.system_tools import build_system_tools
 from meoclaw.tools.todo_tool import (
     TodoWriteInput,
     TodoWriteTool,
@@ -96,6 +97,7 @@ __all__ = [
     "planner_node",
     "resolve_emit",
     "resolve_model",
+    "responder_node",
     "run_verification_commands",
     "supervisor_node",
     "verifier_node",
@@ -115,6 +117,57 @@ MAX_VERIFIER_LOOPS = 6
 DEFAULT_MAX_ATTEMPTS = 3
 #: 路由终点的名字
 FINAL = "final"
+
+RESPONDER_PROMPT = """You are the single MeoClaw Main Agent.
+Answer directly in Chinese. Use WebSearchTool and WebFetchTool when current
+information is needed and cite source URLs. Do not modify the workspace, run
+shell commands, or claim that files were changed."""
+
+
+def responder_node(
+    state: MeoGraphState,
+    config: RunnableConfig | None = None,
+) -> dict[str, Any]:
+    """Answer a conversational request without entering the task workflow."""
+    runtime = require_runtime(state)
+    model = resolve_model(state, config)
+    emit = resolve_emit(config)
+    _emit_node_start(emit, "responder")
+
+    task_id = str((runtime.metadata or {}).get("task_id") or "")
+    timeline = [
+        message
+        for message in (state.get("messages") or [])
+        if isinstance(message, (HumanMessage, AIMessage))
+        and not getattr(message, "tool_calls", None)
+    ][-12:]
+    collected: list[BaseMessage] = []
+    answer = ""
+    stopped_reason = ""
+    for event in stream_react_events(
+        str(state.get("task") or "回答用户"),
+        runtime=runtime,
+        max_loops=6,
+        model=model,
+        tools=build_web_tools(),
+        system_prompt=RESPONDER_PROMPT,
+        input_messages=timeline,
+        role="chat",
+        task_id=task_id,
+        message_sink=collected,
+        stream_tokens=True,
+    ):
+        if emit is not None:
+            _forward_react_event(emit, "responder", event)
+        if event.get("type") == "final_answer":
+            answer = str(event.get("content") or "")
+            stopped_reason = str(event.get("stopped_reason") or "")
+    if stopped_reason == "max_loops":
+        answer = f"{answer}\n\n[回答达到最大轮数，结果可能不完整]".strip()
+    return {
+        "final_answer": answer or "我没有生成有效回答，请换一种问法。",
+        "messages": collected,
+    }
 
 
 class PlannerError(RuntimeError):
@@ -621,9 +674,18 @@ def actor_node(
     use_docker = kernel == "docker"
     tools = [
         *build_tools(runtime, include_bash=not use_docker),
+        *build_system_tools(runtime, include_web=False),
         build_todo_update_tool(runtime),
     ]
     extra_middleware = [build_sandbox_shell_middleware(runtime)] if use_docker else []
+    configurable = (config or {}).get("configurable") or {}
+    permission_policy = str(
+        configurable.get("permission_policy")
+        or (runtime.metadata or {}).get("permission")
+        or "full"
+    )
+    approval_handler = configurable.get("approval_handler")
+    decision_sink = configurable.get("decision_sink")
     collected: list[BaseMessage] = []
     summary = ""
     stopped_reason = ""
@@ -638,6 +700,9 @@ def actor_node(
         input_messages=bundle.messages,
         role="actor",
         task_id=task_id,
+        permission_policy=permission_policy,
+        approval_handler=approval_handler,
+        decision_sink=decision_sink,
         extra_middleware=extra_middleware,
         message_sink=collected,
         stream_tokens=True,

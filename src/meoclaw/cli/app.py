@@ -324,6 +324,8 @@ def _run_agent(
             model_name=model_name,
             temperature=temperature,
             sandbox_mode=os.environ.get("MEOCLAW_SANDBOX", "docker"),
+            permission_policy=os.environ.get("MEOCLAW_PERMISSION", "full"),
+            auto_route=True,
         )
         return _stream_events(
             console, events, max_attempts, emoji_ok=emoji_ok, box_style=box_style

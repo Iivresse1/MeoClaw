@@ -5,7 +5,7 @@ import type {
   PendingApproval,
   Step,
 } from "../types";
-import { MODE_HINTS, MODE_LABELS } from "../types";
+import { PERMISSION_HINTS, PERMISSION_LABELS } from "../types";
 import ArtifactList from "./ArtifactList";
 import ApprovalCard from "./ApprovalCard";
 import Composer from "./Composer";
@@ -21,8 +21,10 @@ interface Props {
   durationMs: number | null;
   approval: PendingApproval | null;
   error: string;
-  mode: string;
-  onMode: (m: string) => void;
+  permission: string;
+  onPermission: (permission: string) => void;
+  archived: boolean;
+  onRestore: () => void;
   onSend: (text: string) => void;
   onResolveApproval: (decision: boolean) => void;
 }
@@ -91,8 +93,10 @@ export default function ChatView({
   durationMs,
   approval,
   error,
-  mode,
-  onMode,
+  permission,
+  onPermission,
+  archived,
+  onRestore,
   onSend,
   onResolveApproval,
 }: Props) {
@@ -108,7 +112,7 @@ export default function ChatView({
   }, [messages, stream, steps, running, artifacts]);
 
   const empty = messages.length === 0 && !running && !stream;
-  const displayMode = MODE_LABELS[mode] || mode;
+  const displayPermission = PERMISSION_LABELS[permission] || permission;
 
   return (
     <div className="chat">
@@ -118,8 +122,11 @@ export default function ChatView({
           <span>{running ? "正在执行" : "准备就绪"}</span>
           {durationMs !== null && <span className="run-duration">{durationLabel(durationMs)}</span>}
         </div>
-        <span className="mode-badge" title={MODE_HINTS[mode] || ""}>
-          {displayMode}
+        <span
+          className="permission-badge"
+          title={PERMISSION_HINTS[permission] || ""}
+        >
+          {archived ? "已归档" : displayPermission}
         </span>
       </header>
 
@@ -173,13 +180,20 @@ export default function ChatView({
       </div>
 
       <div className="chat-bottom">
+        {archived && (
+          <div className="archived-banner">
+            <span>此会话已归档，只能查看历史记录。</span>
+            <button onClick={onRestore}>恢复会话</button>
+          </div>
+        )}
         {approval && <ApprovalCard approval={approval} onResolve={onResolveApproval} />}
         <Composer
           value={draft}
           onChange={setDraft}
-          mode={mode}
-          onMode={onMode}
+          permission={permission}
+          onPermission={onPermission}
           running={running}
+          locked={archived}
           onSend={() => {
             onSend(draft);
             setDraft("");

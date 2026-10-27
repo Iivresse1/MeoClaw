@@ -1,6 +1,6 @@
 # MeoClaw 后端构思与实现
 
-> 适用快照：MeoClaw `1.1.0`，分支 `MeoAgent1.1`，制品标签 `ver3.0`。
+> 适用快照：MeoClaw `1.1.0`，分支 `MeoAgent1.1`，制品标签 `ver3.5`。
 > 范围：后端，包括 Bridge、LangGraph、LangChain Agent、工具、持久化、沙箱、测试与发布。
 
 ---
@@ -36,23 +36,23 @@ Bridge 被其他网页或本机进程随意调用
 
 ---
 
-## 二、确定后端的三种模式
+## 二、一个 Main Agent，三档权限
 
-统一入口不代表统一执行路径。MeoClaw 先按“后端需要哪些能力”划出三个模式。
+Agent 身份与权限策略必须拆开。所有用户请求进入同一个 LangGraph 入口：
 
-| 模式 | 后端目标 | 工具能力 | 是否需要外层工作流 | 连续性来源 |
-| --- | --- | --- | --- | --- |
-| `chat` | 模型对话与联网查询 | WebSearch/WebFetch | 否，单个 Agent | 会话消息库 |
-| `workspace` | 在工作区内完成任务 | 文件、WebSearch/WebFetch、受限 shell | 是 | LangGraph checkpoint |
-| `system` | 联网与操作系统能力 | WebSearch/WebFetch、截图、剪贴板、打开 URL/文件 | 否，单个 Agent | 任务 checkpoint + 人工审批 |
+- 普通问答进入只读 responder，只允许 WebSearch/WebFetch；
+- 需要文件、shell 或系统操作时进入 planner → actor → verifier；
+- 用户只选择 `human / ai / full` 三档权限，不再选择“对话 Agent”或“系统 Agent”。
 
-这个划分的原因在于：
+| 权限 | 敏感动作 | 低风险动作 |
+| --- | --- | --- |
+| `human` | 文件写入、文件编辑、笔记追加、shell、剪贴板读取逐次人工确认 | 截图、打开 URL、写剪贴板、已知文档类型直接执行 |
+| `ai` | 独立 Reviewer 判断 shell 安全度和文件修改范围；不确定时转人工 | 与人工审核相同 |
+| `full` | 不请求审批 | 不请求审批；路径、凭据、Docker 和 verifier 硬边界仍生效 |
 
-- `chat` 不需要计划和验收，但仍使用单个 Agent 以支持只读联网工具。
-- `workspace` 有真实副作用，需要“计划、执行、验证”三个阶段。
-- `system` 的动作敏感，重点是人工审批，不是多角色规划。
-
-不同的模式完成不同类型的任务，比如我需要查询一些信息但我不希望Agent突然给我执行一堆代码之类的那就是chat模式最合适了。
+内部 `TODO.md` 更新属于运行状态，不触发文件审批。`NotepadAppendTool` 写入用户可见
+的长期笔记，因此属于敏感文件写入。`OpenWorkspaceFile` 只直接打开白名单文档类型；
+可执行文件和未知类型转人工。
 
 ---
 
@@ -125,9 +125,9 @@ Bridge
 MeoClaw 当前规则：
 
 - `session_id` 是 12 位十六进制；
-- workspace 外层图使用 `session_id` 作为 `thread_id`；
-- system Agent 使用当前 `task_id` 作为 `thread_id`；
-- 同一个 session 的下一个 workspace 任务会进入同一条 checkpoint 时间线。
+- 所有 Main Agent 任务使用 `session_id` 作为 `thread_id`；
+- 同一 session 的后续任务进入同一条 checkpoint 时间线；
+- `task_id` 只标识一次执行和对应的事件队列。
 
 身份一旦混用，会出现“消息串会话”“审批恢复错任务”“删除工作区删错目录”等问题，所以必须先定下来。
 
@@ -139,7 +139,7 @@ MeoClaw 当前规则：
 GET    /api/health
 GET    /api/sessions
 GET    /api/sessions/{sid}/messages
-DELETE /api/sessions/{sid}
+POST   /api/sessions/{sid}/archive
 
 GET    /api/settings
 POST   /api/settings
@@ -388,7 +388,7 @@ supervisor 通过工具委派：
 | `ModelCallLimitMiddleware` | 限制模型调用次数 | 计算验证轮数 |
 | `ToolCallLimitMiddleware` | 限制工具调用总数 | 决定任务是否完成 |
 | `SummarizationMiddleware` | 当前 Agent 上下文过长时压缩 | 保存跨任务历史 |
-| `HumanInTheLoopMiddleware` | 高危工具暂停等待批准 | 执行工具本身 |
+| `ToolPermissionMiddleware` | 按权限策略放行、拒绝、人工批准或 AI 审核 | 执行工具本身 |
 | `ShellToolMiddleware` + Docker policy | 提供隔离 shell | 判断验收是否通过 |
 
 重试策略尤其要克制。WebSearch 可以安全重试；文件写入、剪贴板写入和 shell 命令可能有副作用，不能自动重复。
@@ -579,15 +579,16 @@ Bridge 只监听本机，但仍然需要 capability token：
 - planner 只能发布计划；
 - verifier 只能只读查证；
 - searchAgent 只能联网搜索和读取网页；
+- Main Agent 的 actor 可写文件、运行 Docker shell 和使用受限桌面工具；
 - codeAgent 才可写文件和运行 shell，联网工具仍为只读；
-- system 工具的高危调用必须经过 HITL。
+- 工具是否直接执行由 `ToolPermissionMiddleware` 根据当前权限策略决定。
 
 能力边界由工具集决定，不由模型名字决定。
 
 ### 10.3.1 联网工具权限
 
-`WebSearchTool` 与 `WebFetchTool` 是全局只读工具，在 chat、workspace、
-system、verifier、codeAgent 和 searchAgent 中可用。两者不访问本地工作区，
+`WebSearchTool` 与 `WebFetchTool` 是全局只读工具，在 Main Agent、
+verifier、codeAgent 和 searchAgent 中可用。两者不访问本地工作区，
 不要求 HITL 审批；WebFetch 只接受 `http(s)` URL，并通过 Tavily Extract
 返回有字符上限的网页正文。`ToolRetryMiddleware` 仍只重试 WebSearch，
 避免重复抓取产生额外副作用。
@@ -1169,8 +1170,11 @@ Docker 不可用时，验证不得通过。
 
 - FastAPI REST + WebSocket Bridge；
 - Bearer token 和 CORS 白名单；
-- session 路径、删除路径和工作区路径检查；
-- chat、workspace、system 三种后端路径；
+- session 路径、归档/恢复和工作区路径检查；
+- 单一 LangGraph Main Agent：直接回答与行动任务分支；
+- `human / ai / full` 三档权限与独立 AI Reviewer；
+- 文件写入、笔记追加、shell、剪贴板读取的人工审批；
+- 归档会话只读、恢复后继续，API 不再提供永久删除；
 - LangChain `create_agent` 内层循环；
 - LangGraph planner → actor → verifier → final；
 - 条件边、最大验证轮数、失败回填；
@@ -1181,7 +1185,7 @@ Docker 不可用时，验证不得通过。
 - final 节点自动写入有界历史摘要，并由 ContextBuilder 在后续任务中读取；
 - Docker actor shell；
 - verifier 命令与 actor 共用 Docker 执行策略；
-- LangChain middleware 工具错误、预算、搜索重试、摘要和 HITL；
+- LangChain middleware 工具错误、预算、搜索重试、摘要和权限决策；
 - WebSearch/WebFetch 全局只读工具与 Tavily 一键配置；
 - supervisor、searchAgent、codeAgent 代码路径；
 - Fake Model 后端回归测试。
@@ -1190,7 +1194,7 @@ Docker 不可用时，验证不得通过。
 
 | 优先级 | 问题 | 影响 |
 | --- | --- | --- |
-| P1 | HITL 不能跨 Bridge 进程重启恢复 | 恢复语义不完整 |
+| P1 | 人工审批不能跨 Bridge 进程重启恢复 | 恢复语义不完整 |
 | P2 | 复杂 supervisor 图没有默认选择规则 | 能力存在但不能稳定触发 |
 | P2 | 同 session 并发任务缺少写入串行协议 | 工作区可能竞争 |
 | P2 | 事件字段缺少共享 schema | Bridge 与调用方容易漂移 |
@@ -1219,10 +1223,10 @@ Docker 不可用时，验证不得通过。
 1. ……
 2. ……
 
-模式与能力：
-- chat：
-- workspace：
-- system：
+权限与能力：
+- human：
+- ai：
+- full：
 
 状态所有权：
 - 谁创建：

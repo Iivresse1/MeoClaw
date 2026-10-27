@@ -10,7 +10,8 @@ const BASE = `http://127.0.0.1:${PORT}`;
 export interface Session {
   id: string;
   title: string;
-  mode: string;
+  permission: string;
+  archived: boolean;
   created_at: number;
 }
 
@@ -60,7 +61,11 @@ async function j<T>(path: string, opts: RequestInit = {}): Promise<T> {
 export const api = {
   sessions: () => j<Session[]>("/api/sessions"),
   messages: (sid: string) => j<MsgRow[]>(`/api/sessions/${sid}/messages`),
-  deleteSession: (sid: string) => j(`/api/sessions/${sid}`, { method: "DELETE" }),
+  archiveSession: (sid: string, archived: boolean) =>
+    j<{ ok: boolean; message?: string }>(`/api/sessions/${sid}/archive`, {
+      method: "POST",
+      body: JSON.stringify({ archived }),
+    }),
   settings: () => j<Settings>("/api/settings"),
   patchSettings: (patch: Partial<Settings>) =>
     j("/api/settings", { method: "POST", body: JSON.stringify(patch) }),
@@ -80,7 +85,11 @@ export const api = {
     }),
   removeTavily: () =>
     j<{ ok: boolean; message: string }>("/api/tavily", { method: "DELETE" }),
-  startTask: (body: { task: string; mode: string; session_id?: string | null }) =>
+  startTask: (body: {
+    task: string;
+    permission: string;
+    session_id?: string | null;
+  }) =>
     j<{ ok: boolean; message?: string; task_id?: string; session_id?: string }>(
       "/api/task",
       { method: "POST", body: JSON.stringify(body) }

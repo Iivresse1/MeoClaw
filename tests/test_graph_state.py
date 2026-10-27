@@ -31,6 +31,7 @@ def test_state_is_total_false() -> None:
     assert MeoGraphState.__optional_keys__ == frozenset(
         {
             "task",
+            "workflow_kind",
             "runtime",
             "messages",
             "plan_summary",

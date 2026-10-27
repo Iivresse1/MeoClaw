@@ -1,6 +1,8 @@
 # MeoClaw
 
-MeoClaw 是一个本地桌面的 AI 助理：支持纯对话、工作区文件任务和系统工具（截图/剪贴板/打开链接）三类模式。所有可执行工具的 Agent 模式都支持 Tavily 网络搜索与网页正文读取；1.1 分支使用 LangChain `create_agent` 与 middleware 管理 ReAct 循环、工具错误、调用预算、上下文摘要和人工审批，并通过 SQLite checkpoint 持久化会话。
+MeoClaw 是一个本地桌面的 AI 助理。所有请求都由同一个 Main Agent 接收：普通问答直接回答，需要文件、shell 或系统操作时进入 planner → actor → verifier 工作流。用户只选择人工审核、AI 自动审核或完全权限，权限策略与 Agent 身份相互独立。
+
+~想看如何构建后端的？可以打开 docs 下的 BACKEND_GUIDE 进行阅读。
 
 ## 项目整体架构
 
@@ -16,7 +18,7 @@ MeoClaw 是一个本地桌面的 AI 助理：支持纯对话、工作区文件�
 ```
 输入消息 → POST /api/task（懒建会话、用户消息落库、后台线程启动）
         → WS /ws/task/{id} 推事件（node_start / ai_token / plan / tool_call / tool_result /
-          verification / final_answer / approval_request / ui_done）
+          verification / policy_decision / approval_request / final_answer / ui_done）
         → final_answer 自动落库为助手消息 → 侧边栏刷新会话标题
 ```
 
@@ -29,9 +31,9 @@ MeoClaw 是一个本地桌面的 AI 助理：支持纯对话、工作区文件�
 │  ├─ config.py               # settings.json 读写、keyring 密钥、供应商解析
 │  ├─ store.py                # SQLite 会话/消息持久化（懒创建）
 │  └─ adapters/
-│     ├─ runner.py            # 三模式后台执行 + HITL 审批注册表
+│     ├─ runner.py            # 单一工作流后台执行 + 人工审批注册表
 │     ├─ model_factory.py     # 由激活供应商构造 ChatOpenAI、测试连接
-│     └─ system_tools.py      # 系统工具集（5 个，高危需批准）
+│     └─ system_tools.py      # 兼容导入，正式实现位于 src/meoclaw/tools
 ├─ desktop/                   # Electron + React 前端
 │  ├─ electron/main.cjs       # 主进程：桥接子进程管理、窗口、去菜单
 │  ├─ electron/preload.cjs    # 通过 IPC 暴露 bridgePort 与能力令牌
@@ -50,7 +52,7 @@ MeoClaw 是一个本地桌面的 AI 助理：支持纯对话、工作区文件�
 | 接口 | 说明 |
 | --- | --- |
 | `GET /api/health` | 健康检查（Electron 启动前探测/复用） |
-| `GET /api/sessions`、`GET /api/sessions/{sid}/messages`、`DELETE /api/sessions/{sid}` | 会话与消息 |
+| `GET /api/sessions`、`GET /api/sessions/{sid}/messages`、`POST /api/sessions/{sid}/archive` | 会话、消息、归档与恢复；不提供永久删除 |
 | `GET/POST /api/settings` | 读写 `temperature / max_attempts / permission / sidebar_open` |
 | `POST /api/providers`、`DELETE /api/providers/{name}`、`POST /api/providers/active` | CC Switch 式供应商管理 |
 | `POST /api/test-connection` | 用表单参数（或已存密钥）试调模型 |
@@ -59,16 +61,16 @@ MeoClaw 是一个本地桌面的 AI 助理：支持纯对话、工作区文件�
 | `POST /api/approval/{aid}` | 审批放行/拒绝 |
 | `WS /ws/task/{tid}` | 推送 runner 事件流，`ui_done` 收尾 |
 
-- `runner.start(...)`：启动后台任务并把 LangChain/LangGraph 原生事件写入队列；`workspace` 驱动角色图，`system` 驱动带 HITL middleware 的 Agent
-- `runner.resume_approval(...)`：审批后使用 `Command(resume=...)` 恢复 SQLite checkpoint 中的任务
-- `system_tools`：`WebSearchTool / WebFetchTool` + `TakeScreenshot / ClipboardRead / ClipboardWrite / OpenUrl / OpenWorkspaceFile`，路径经 `resolve_in_workspace` 安检，越界直接拒绝
-- `store`：会话仅在首条消息时落库，标题取首条消息前 60 字
+- `runner.start(...)`：所有任务进入同一个 LangGraph；纯问答路由到 responder，行动任务进入 planner → actor → verifier
+- `runner.resume_approval(...)`：解除当前被阻塞的敏感工具调用，仅消费一次审批 ID
+- `system_tools`：截图、剪贴板、打开 URL/文件等系统能力由统一 Main Agent 使用，权限策略逐次决定是否执行
+- `store`：会话仅在首条消息时落库；会话只能归档和恢复，归档会话必须恢复后才能继续任务
 
 ### 前端（desktop/src）
 
 - `App.tsx`：全局状态中枢；`handleEvent()` 将 `ai_token` 增量映射为流式回答，并把计划、工具、验证和审批显示为实时进度；Ctrl+B 切换侧边栏
 - `api.ts`：REST 封装 + `taskSocket()`；端口取 `window.meoclaw.bridgePort`（纯浏览器调试回落 8931）
-- 组件：`Sidebar`（品牌+新会话+历史）、`ChatView`（欢迎屏/消息流）、`Composer`（输入卡片+权限下拉，无模型选择器）、`ProgressCard`（可折叠执行过程）、`ApprovalCard`（允许/拒绝）、`SettingsModal`（供应商与运行参数）
+- 组件：`Sidebar`（新任务、归档显示/隐藏、归档恢复）、`ChatView`（欢迎屏/消息流）、`Composer`（输入卡片+权限下拉）、`ProgressCard`（含权限审核结果）、`ApprovalCard`（允许/拒绝）、`SettingsModal`（供应商与运行参数）
 - `styles.css`：黑白浅色主题（主色 `#171717`，无彩色）
 
 ## 技术栈
@@ -235,15 +237,15 @@ npm install
 **Tavily 联网检索**：在设置页粘贴 Tavily API Key 并点击「一键配置」。Key 以
 `tavily:api_key` 存入系统凭据，不会写入 `settings.json`。环境变量
 `TAVILY_API_KEY` 优先级最高，适合 CLI 或自动化环境。配置完成后，
-`WebSearchTool` 与 `WebFetchTool` 在 chat、workspace、system 和专家 Agent 中可用。
+`WebSearchTool` 与 `WebFetchTool` 在统一 Main Agent、verifier 和专家 Agent 中可用。
 
 **`%APPDATA%\MeoClawDesktop\settings.json`**：
 
 | 字段 | 默认 | 说明 |
 | --- | --- | --- |
 | `temperature` | `0.0` | 采样温度 |
-| `max_attempts` | `3` | workspace 模式最大验证轮数 |
-| `permission` | `workspace` | 输入框权限档位记忆 |
+| `max_attempts` | `3` | 行动任务最大验证轮数 |
+| `permission` | `human` | 权限策略：`human / ai / full` |
 | `providers` / `active_provider` | `[]` / `""` | 供应商列表与当前项 |
 | `sidebar_open` | `true` | 侧边栏开合状态 |
 
@@ -254,20 +256,25 @@ npm install
 | `MEOCLAW_SANDBOX` | `docker` | workspace shell 隔离模式；生产不建议使用 `host` |
 | `MEOCLAW_SANDBOX_IMAGE` | `meoclaw-sandbox:latest` | 沙箱镜像 |
 | `MEOCLAW_SANDBOX_NETWORK` | `0` | 设为 `1` 才允许容器联网 |
+| `MEOCLAW_PERMISSION` | `full` | CLI 权限策略；桌面端由输入框选择 |
 | `MEOCLAW_ALLOWED_ORIGINS` | 本地 Vite/Electron | REST CORS 白名单 |
 
 ## 权限模式
 
 | 下拉文案 | 内部值 | 行为 |
 | --- | --- | --- |
-| 仅对话 | `chat` | `create_agent` + WebSearch/WebFetch；携带会话历史，不访问工作区 |
-| 在工作区内修改 | `workspace`（默认） | planner→implementation→verifier→final；含 WebSearch/WebFetch，shell 在 Docker 中执行，Docker 不可用时 fail-closed |
-| 系统工具（需批准） | `system` | `create_agent` + WebSearch/WebFetch + 5 个系统工具；敏感调用经 `HumanInTheLoopMiddleware` 中断，用户决定后恢复 |
+| 人工审核 | `human`（默认） | 文件写入、文件编辑、笔记追加、shell、剪贴板读取逐次人工确认；截图、打开 URL、写剪贴板和已知文档类型直接执行 |
+| AI 自动审核 | `ai` | 独立 Reviewer 根据硬规则判断 shell 安全度和文件修改范围；明确允许才执行，拒绝则终止，不确定时转人工 |
+| 完全权限 | `full` | 不弹审批；路径越界、凭据访问、Docker 外 shell 和 verifier 真实性等硬边界仍然生效 |
+
+`TODO.md` 属于内部运行状态，自动持久化；`NotepadAppendTool` 是用户可见的长期笔记写入，因此受权限策略控制。归档会话与活动会话按原创建时间统一排序，归档项使用淡色样式，默认隐藏。
+
+升级到当前 schema 时会清空旧版 `chat / workspace / system` 会话、对应会话工作区和 checkpoint，不生成迁移备份。进入正式版本后，UI 和 Bridge 都不再提供永久删除会话的能力。
 
 ## 测试
 
 - 后端核心全链路回归（假模型、无需 API Key）：仓库根目录运行 `python -m pytest`
-- 桥接层安全测试：鉴权、Origin、session 路径和删除边界
+- 桥接层安全测试：鉴权、Origin、session 路径、归档/恢复和禁止删除
 - 桌面端构建：`cd desktop; npm install; npm run build`
 
 ---

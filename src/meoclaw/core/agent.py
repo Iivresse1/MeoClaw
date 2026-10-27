@@ -40,14 +40,16 @@ from pathlib import Path
 from typing import Any
 
 from langchain_core.language_models import BaseChatModel
+from langchain_core.messages import HumanMessage, SystemMessage
 
+from meoclaw.core.permissions import ApprovalHandler, DecisionSink
 from meoclaw.core.react import (
     ACTOR_PROMPT,
     message_text,
     serialize_tool_result,
 )
 from meoclaw.core.state import RuntimeState
-from meoclaw.graph.nodes import DEFAULT_MAX_ATTEMPTS
+from meoclaw.graph.nodes import DEFAULT_MAX_ATTEMPTS, extract_json_object
 from meoclaw.graph.workflow import build_workflow, initial_state
 from meoclaw.providers.openai_provider import create_model
 
@@ -75,6 +77,27 @@ UNIFIED_EVENT_TYPES: tuple[str, ...] = (
     "workflow_end",
     "custom",
 )
+
+ROUTER_PROMPT = """Classify the user request for MeoClaw.
+Return ONLY JSON: {"workflow_kind":"answer"|"task"}.
+Use "answer" for conversation, explanations, advice, and information lookup.
+Use "task" when files must be inspected or changed, shell/code must run, or a
+desktop/system action is requested."""
+
+
+def _classify_workflow(model: Any, task: str) -> str:
+    try:
+        response = model.invoke(
+            [
+                SystemMessage(content=ROUTER_PROMPT),
+                HumanMessage(content=task),
+            ]
+        )
+        payload = extract_json_object(message_text(getattr(response, "content", "")))
+        kind = str((payload or {}).get("workflow_kind") or "").strip().lower()
+        return kind if kind in {"answer", "task"} else "task"
+    except Exception:  # noqa: BLE001 - routing failure uses the safer task path
+        return "task"
 
 
 def _iter_updates(payload: Any) -> Iterator[tuple[str, Any]]:
@@ -107,6 +130,10 @@ def stream_agent_events(
     session_id: str | None = None,
     checkpointer: Any = None,
     sandbox_mode: str | None = None,
+    permission_policy: str = "full",
+    approval_handler: ApprovalHandler | None = None,
+    decision_sink: DecisionSink | None = None,
+    auto_route: bool = False,
 ) -> Iterator[dict[str, Any]]:
     """跑一遍完整工作流（planner → actor → verifier → final），逐事件 yield。
 
@@ -139,6 +166,7 @@ def stream_agent_events(
     chat_model = model if model is not None else create_model(
         model=model_name, temperature=temperature
     )
+    workflow_kind = _classify_workflow(chat_model, task) if auto_route else "task"
 
     inputs = initial_state(
         task,
@@ -150,16 +178,27 @@ def stream_agent_events(
         task_id=task_id,
         session_id=session_id,
         sandbox_mode=sandbox_mode,
+        workflow_kind=workflow_kind,
     )
+    inputs["runtime"].metadata["permission"] = permission_policy
     workflow = build_workflow(checkpointer=checkpointer)
-    config: dict[str, Any] = {}
+    config: dict[str, Any] = {
+        "configurable": {
+            "permission_policy": permission_policy,
+            "approval_handler": approval_handler,
+            "decision_sink": decision_sink,
+            "permission_model": chat_model,
+        }
+    }
     if checkpointer is not None:
-        config = {
-            "configurable": {
-                "thread_id": str(inputs["runtime"].metadata.get("thread_id") or session_id),
+        config["configurable"].update(
+            {
+                "thread_id": str(
+                    inputs["runtime"].metadata.get("thread_id") or session_id
+                ),
                 "model": chat_model,
             }
-        }
+        )
 
     passed = False
     attempts = 0
@@ -196,6 +235,16 @@ def stream_agent_events(
                     "todos": update.get("todos") or [],
                     "acceptance_criteria": update.get("acceptance_criteria") or [],
                     "verification_commands": update.get("verification_commands") or [],
+                }
+
+            elif node == "responder":
+                final_answer = str(update.get("final_answer") or "")
+                passed = True
+                yield {
+                    "type": "final_answer",
+                    "node": node,
+                    "content": final_answer,
+                    "passed": True,
                 }
 
             elif node == "actor":

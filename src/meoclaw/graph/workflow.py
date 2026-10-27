@@ -31,6 +31,7 @@ from meoclaw.graph.nodes import (
     actor_node,
     final_node,
     planner_node,
+    responder_node,
     supervisor_node,
     verifier_node,
     verifier_route,
@@ -41,6 +42,10 @@ if TYPE_CHECKING:  # pragma: no cover - 仅用于类型提示
     from langgraph.graph.state import CompiledStateGraph
 
 __all__ = ["build_complex_workflow", "build_workflow", "initial_state"]
+
+
+def _start_route(state: MeoGraphState) -> str:
+    return "responder" if state.get("workflow_kind") == "answer" else "planner"
 
 
 def build_workflow(checkpointer: Any = None) -> CompiledStateGraph:
@@ -57,11 +62,17 @@ def build_workflow(checkpointer: Any = None) -> CompiledStateGraph:
     #----构建图时，先定义状态，再添加节点和边，最后编译----#
 
     graph.add_node("planner", planner_node)
+    graph.add_node("responder", responder_node)
     graph.add_node("actor", actor_node)
     graph.add_node("verifier", verifier_node)
     graph.add_node("final", final_node)
 
-    graph.add_edge(START, "planner")
+    graph.add_conditional_edges(
+        START,
+        _start_route,
+        {"responder": "responder", "planner": "planner"},
+    )
+    graph.add_edge("responder", END)
     graph.add_edge("planner", "actor")
     graph.add_edge("actor", "verifier")
     graph.add_conditional_edges(
@@ -113,6 +124,7 @@ def initial_state(
     task_id: str | None = None,
     session_id: str | None = None,
     sandbox_mode: str | None = None,
+    workflow_kind: str = "task",
 ) -> dict[str, Any]:
     """构造调用图所需的初始状态（顺带创建/校验 workspace）。
 
@@ -156,6 +168,7 @@ def initial_state(
 
     return {
         "task": task,
+        "workflow_kind": workflow_kind if workflow_kind in {"answer", "task"} else "task",
         "runtime": runtime,
         "messages": [user_message],
         "max_attempts": max(1, int(max_attempts)),

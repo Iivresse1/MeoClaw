@@ -29,6 +29,7 @@ from pydantic import Field
 
 from meoclaw.core.context_builder import tag_message_context
 from meoclaw.core.middleware import build_agent_middleware
+from meoclaw.core.permissions import ApprovalHandler, DecisionSink
 from meoclaw.core.state import RuntimeState
 from meoclaw.prompts.stage2 import ACTOR_PROMPT
 from meoclaw.providers.openai_provider import create_model
@@ -146,6 +147,9 @@ def stream_react_events(
     role: str = "actor",
     task_id: str = "",
     approval_tools: Sequence[str] | None = None,
+    permission_policy: str = "full",
+    approval_handler: ApprovalHandler | None = None,
+    decision_sink: DecisionSink | None = None,
     checkpointer: Any = None,
     middleware: Sequence[AgentMiddleware] | None = None,
     extra_middleware: Sequence[AgentMiddleware] | None = None,
@@ -180,6 +184,9 @@ def stream_react_events(
             max_model_calls=max_loops,
             summary_token_limit=summary_token_limit,
             approval_tools=approval_tools,
+            permission_policy=permission_policy,
+            approval_handler=approval_handler,
+            decision_sink=decision_sink,
         )
     )
     if extra_middleware:

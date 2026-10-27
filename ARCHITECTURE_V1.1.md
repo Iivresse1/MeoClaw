@@ -8,8 +8,10 @@ LangChain 1.x while preserving MeoClaw's differentiation:
 - an explicit planner, implementation agent, read-only verifier and final node;
 - fail-closed verification based on commands plus model inspection;
 - one canonical message timeline shared across nodes and tasks;
-- Tavily web search and page fetching available in interactive modes and role agents;
-- persistent checkpoints and resumable human approvals through SQLite;
+- one Main Agent with conversation and action routes;
+- Tavily web search and page fetching available to the Main Agent and role agents;
+- explicit human, AI-review, and full-access permission policies;
+- persistent checkpoints and blocking human approval requests;
 - Docker-isolated shell execution.
 
 ## Runtime Topology
@@ -18,8 +20,10 @@ LangChain 1.x while preserving MeoClaw's differentiation:
 React/Electron
   -> authenticated REST + WebSocket Bridge
   -> Tavily WebSearch / WebFetch (API key in keyring)
-  -> LangGraph role graph
-       planner
+  -> LangGraph Main Agent entry
+       classifier
+         -> direct responder (read-only web)
+         -> planner
          -> implementation create_agent
          -> read-only verifier create_agent
        verifier failed -> planner
@@ -27,7 +31,7 @@ React/Electron
   -> SQLite checkpoint/message store
 ```
 
-The role graph owns task boundaries and fail-closed semantics. `create_agent`
+The Main Agent graph owns routing and task boundaries. `create_agent`
 owns each model-tool loop. The Bridge maps native LangChain events to the
 existing WebSocket event contract.
 
@@ -41,7 +45,7 @@ existing WebSocket event contract.
 | `ModelCallLimitMiddleware` | Enforces the ReAct model-call budget |
 | `ToolCallLimitMiddleware` | Enforces the tool-call budget |
 | `SummarizationMiddleware` | Compresses long in-agent histories at a token threshold |
-| `HumanInTheLoopMiddleware` | Suspends sensitive system-tool calls until approval |
+| `ToolPermissionMiddleware` | Applies human, AI-review, or full-access policy before sensitive calls |
 
 Infrastructure failures are not swallowed. The stack replaces only
 tool-execution exception handling.
@@ -49,7 +53,7 @@ tool-execution exception handling.
 ## Web Access
 
 `WebSearchTool` and `WebFetchTool` are read-only tools registered globally for
-chat, workspace, system, verifier, codeAgent and searchAgent loops. The Tavily
+the Main Agent, verifier, codeAgent and searchAgent loops. The Tavily
 key is resolved from `TAVILY_API_KEY` first and from the OS keyring second.
 The settings API validates a candidate key before storing it; keys are never
 returned by the status endpoint or written to settings JSON.
@@ -73,9 +77,9 @@ Messages are tagged with `context_task_id` and `context_roles`.
 `%APPDATA%\MeoClawDesktop\checkpoints.sqlite`. A session uses a stable
 `thread_id`, so later tasks continue the same timeline.
 
-`HumanInTheLoopMiddleware` interrupts system-tool calls. UI decisions resume the
-graph with `Command(resume=...)`; approvals no longer block on a custom
-`threading.Event`.
+Sensitive calls block only the background task while the Bridge waits for an
+approval decision. AI review uses a separate model invocation and escalates
+uncertain calls to human review.
 
 ## Security Boundaries
 
@@ -83,8 +87,8 @@ graph with `Command(resume=...)`; approvals no longer block on a custom
 - CORS is restricted to development and packaged Electron origins; the token is
   still mandatory.
 - `session_id` must be a generated 12-character hex ID.
-- Session deletion validates paths below the sessions root and only deletes
-  sessions existing in SQLite.
+- Sessions can only be archived or restored. Archived sessions keep their
+  workspace history and cannot start new tasks until restored.
 - Workspace shell execution requires Docker. Without Docker it fails closed
   instead of silently executing on the host.
 

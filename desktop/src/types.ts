@@ -24,14 +24,14 @@ export interface PendingApproval {
   detail: string;
 }
 
-export const MODE_LABELS: Record<string, string> = {
-  chat: "仅对话",
-  workspace: "工作区任务",
-  system: "系统工具",
+export const PERMISSION_LABELS: Record<string, string> = {
+  human: "人工审核",
+  ai: "AI 自动审核",
+  full: "完全权限",
 };
 
-export const MODE_HINTS: Record<string, string> = {
-  chat: "模型对话，可联网搜索和读取网页",
-  workspace: "在隔离会话工作区内读取、修改和验证文件",
-  system: "可联网，并允许调用需要审批的桌面系统工具",
+export const PERMISSION_HINTS: Record<string, string> = {
+  human: "文件写入、shell 和敏感系统操作需要逐次人工确认",
+  ai: "由独立 AI Reviewer 审核敏感操作，不确定时转人工",
+  full: "工具不再请求审批，但仍执行路径、凭据和 Docker 安全边界",
 };

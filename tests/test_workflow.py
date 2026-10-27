@@ -196,6 +196,83 @@ def test_build_workflow_stops_after_max_attempts(tmp_path: Path) -> None:
     assert "还是不对" in result["last_error"]
 
 
+def test_workspace_write_uses_human_permission_policy(tmp_path: Path) -> None:
+    model = Fake(
+        [
+            plan_call(),
+            write_call("hello\n", "w-permission"),
+            AIMessage(content="已写入"),
+            verdict(True, "已通过"),
+            AIMessage(content="完成"),
+        ]
+    )
+    state = initial_state("创建 hello.txt", workspace=tmp_path / "ws", model=model)
+    approvals: list[tuple[str, str]] = []
+
+    result = build_workflow().invoke(
+        state,
+        {
+            "configurable": {
+                "permission_policy": "human",
+                "approval_handler": lambda tool, detail: approvals.append(
+                    (tool, detail)
+                )
+                or True,
+                "decision_sink": lambda _: None,
+            }
+        },
+    )
+
+    assert result["passed"] is True
+    assert approvals[0][0] == "FileWriteTool"
+    assert "修改文件 hello.txt" in approvals[0][1]
+    assert "hello" in approvals[0][1]
+
+
+def test_workspace_write_can_use_ai_permission_policy(tmp_path: Path) -> None:
+    model = Fake(
+        [
+            plan_call(),
+            write_call("hello\n", "w-ai-permission"),
+            AIMessage(
+                content=json.dumps(
+                    {
+                        "decision": "allow",
+                        "reason": "普通源码文件写入",
+                    },
+                    ensure_ascii=False,
+                )
+            ),
+            AIMessage(content="已写入"),
+            verdict(True, "已通过"),
+            AIMessage(content="完成"),
+        ]
+    )
+    state = initial_state("创建 hello.txt", workspace=tmp_path / "ws", model=model)
+    decisions: list[dict[str, Any]] = []
+
+    result = build_workflow().invoke(
+        state,
+        {
+            "configurable": {
+                "permission_policy": "ai",
+                "decision_sink": decisions.append,
+            }
+        },
+    )
+
+    assert result["passed"] is True
+    assert (tmp_path / "ws" / "hello.txt").read_text(encoding="utf-8") == "hello\n"
+    assert decisions == [
+        {
+            "type": "policy_decision",
+            "tool": "FileWriteTool",
+            "decision": "allow",
+            "reason": "普通源码文件写入",
+        }
+    ]
+
+
 # --------------------------------------------------------------------------- #
 # 复杂拓扑（build_complex_workflow：没有 actor 的 supervisor 图）
 # --------------------------------------------------------------------------- #
@@ -376,6 +453,36 @@ def test_stream_agent_events_reports_failure(tmp_path: Path) -> None:
     assert end["attempts"] == 1
     assert "内容不对" in end["last_error"]
     assert end["next_instruction"] == "改成 hello"
+
+
+def test_stream_agent_events_auto_routes_action_request(tmp_path: Path) -> None:
+    model = Fake(
+        [
+            AIMessage(content='{"workflow_kind":"task"}'),
+            plan_call(),
+            write_call("hello\n", "w-route"),
+            AIMessage(content="写完了"),
+            verdict(True, "没问题"),
+            AIMessage(content="总结：已完成。"),
+        ]
+    )
+
+    events = list(
+        stream_agent_events(
+            "创建 hello.txt",
+            workspace=tmp_path / "ws",
+            model=model,
+            auto_route=True,
+            permission_policy="full",
+        )
+    )
+
+    assert any(event["type"] == "plan" for event in events)
+    assert any(
+        event["type"] == "node_start" and event["node"] == "planner"
+        for event in events
+    )
+    assert events[-1]["passed"] is True
 
 
 @pytest.mark.parametrize("task", ["", "   ", None])

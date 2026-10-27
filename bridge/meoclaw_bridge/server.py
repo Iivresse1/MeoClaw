@@ -73,7 +73,7 @@ async def require_bridge_token(request: Request, call_next):
 
 class TaskReq(BaseModel):
     task: str
-    mode: str = "workspace"          # chat / workspace / system
+    permission: str = "human"        # human / ai / full
     session_id: str | None = None
 
 
@@ -90,6 +90,10 @@ class ActiveReq(BaseModel):
 
 class ApprovalReq(BaseModel):
     decision: bool
+
+
+class ArchiveReq(BaseModel):
+    archived: bool = True
 
 
 class TestReq(BaseModel):
@@ -123,16 +127,10 @@ def messages(sid: str):
     return store.get_messages(sid)
 
 
-@app.delete("/api/sessions/{sid}")
-def remove_session(sid: str):
-    if not store.delete_session(sid):
+@app.post("/api/sessions/{sid}/archive")
+def archive_session(sid: str, req: ArchiveReq):
+    if not store.set_session_archived(sid, req.archived):
         return {"ok": False, "message": "会话不存在或 ID 非法"}
-    try:
-        _checkpointer().delete_thread(sid)
-    except Exception:
-        # The session DB/workspace are already removed; checkpoint cleanup is
-        # best-effort so a corrupted old checkpoint DB cannot block deletion.
-        pass
     return {"ok": True}
 
 
@@ -149,6 +147,8 @@ def get_settings():
 
 @app.post("/api/settings")
 def patch_settings(patch: dict):
+    if patch.get("permission") not in (None, "human", "ai", "full"):
+        return {"ok": False, "message": "permission 必须是 human / ai / full"}
     allowed = {k: patch[k] for k in ("temperature", "max_attempts", "permission", "sidebar_open") if k in patch}
     return config.save_settings(allowed)
 
@@ -239,28 +239,31 @@ def start_task(req: TaskReq):
     task = (req.task or "").strip()
     if not task:
         return {"ok": False, "message": "任务内容为空"}
-    mode = req.mode if req.mode in ("chat", "workspace", "system") else "workspace"
-    settings = config.load_settings()
+    permission = (
+        req.permission
+        if req.permission in ("human", "ai", "full")
+        else "human"
+    )
     if req.session_id:
         if not config.SESSION_ID_RE.fullmatch(req.session_id) or not store.session_exists(
             req.session_id
         ):
             return {"ok": False, "message": "session_id 非法或会话不存在"}
+        if store.session_is_archived(req.session_id):
+            return {"ok": False, "message": "归档会话只能查看历史，请先恢复会话"}
         sid = req.session_id
+        store.set_session_permission(sid, permission)
     else:
-        sid = store.create_session(task[:60], mode)  # 懒创建：首条消息才建会话
+        sid = store.create_session(task[:60], permission)
+    settings = config.load_settings()
     store.add_message(sid, "user", task)
-    history = None
-    if mode == "chat":
-        rows = store.get_messages(sid)
-        history = [(r["role"], r["content"]) for r in rows if r["role"] in ("user", "assistant")][:-1]
     tid = uuid.uuid4().hex[:12]
     q = runner.start(
-        mode,
+        permission,
         task,
         settings,
         config.session_workspace(sid),
-        history,
+        None,
         task_id=tid,
         session_id=sid,
         checkpointer=_checkpointer(),
@@ -311,7 +314,15 @@ async def ws_task(ws: WebSocket, tid: str):
 
 
 def main():
-    store.init()
+    reset_legacy = store.init()
+    if reset_legacy:
+        if config.SESSIONS.exists():
+            for child in config.SESSIONS.iterdir():
+                if child.is_dir():
+                    shutil.rmtree(child)
+                else:
+                    child.unlink()
+        config.CHECKPOINTS_DB.unlink(missing_ok=True)
     _checkpointer()
     port = int(os.environ.get("MEOCLAW_BRIDGE_PORT", "8931"))
     uvicorn.run(app, host="127.0.0.1", port=port, log_level="warning")

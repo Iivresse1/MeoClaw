@@ -22,7 +22,7 @@ TAVILY_SECRET_NAME = "tavily:api_key"
 DEFAULTS = {
     "temperature": 0.0,
     "max_attempts": 3,
-    "permission": "workspace",       # chat / workspace / system
+    "permission": "human",           # human / ai / full
     "providers": [],                 # [{"name","model","base_url"}]
     "active_provider": "",           # 当前供应商 name
     "sidebar_open": True,
@@ -35,6 +35,8 @@ def load_settings() -> dict:
             s.update(json.loads(SETTINGS_FILE.read_text(encoding="utf-8")))
         except Exception:
             pass
+    if s.get("permission") not in {"human", "ai", "full"}:
+        s["permission"] = "human"
     return s
 
 

@@ -78,6 +78,7 @@ class MeoGraphState(TypedDict, total=False):
 
     Attributes:
         task: 用户任务原文。
+        workflow_kind: Main Agent 选择的路由，``answer`` 或 ``task``。
         runtime: 运行时状态，携带 workspace 与各类预算；所有工具都以它为准。
         messages: 对话消息（带 add_messages reducer，只增不覆盖）。
         plan_summary: 计划摘要，便于人类审阅与后续节点复用。
@@ -101,6 +102,7 @@ class MeoGraphState(TypedDict, total=False):
     """
 
     task: str
+    workflow_kind: str
     runtime: RuntimeState
     messages: Annotated[list[BaseMessage], add_messages]
     plan_summary: str

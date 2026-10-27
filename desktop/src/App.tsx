@@ -4,8 +4,11 @@ import type { MsgRow, Session } from "./api";
 import Sidebar from "./components/Sidebar";
 import ChatView from "./components/ChatView";
 import SettingsModal from "./components/SettingsModal";
+import ArchivePrototypeSwitcher, {
+  getArchivePrototypeVariant,
+} from "./components/prototype/ArchivePrototypeSwitcher";
 import type { Artifact, ChatMsg, PendingApproval, Step, StepStatus } from "./types";
-import { MODE_LABELS } from "./types";
+import { PERMISSION_LABELS } from "./types";
 
 interface TaskEvent {
   type: string;
@@ -15,6 +18,8 @@ interface TaskEvent {
   tool?: string;
   id?: string;
   detail?: string;
+  decision?: string;
+  reason?: string;
   message?: string;
   command?: string;
   plan_summary?: string;
@@ -40,6 +45,7 @@ function detailText(value: unknown, limit = 1200): string {
 }
 
 export default function App() {
+  const archivePrototypeVariant = getArchivePrototypeVariant();
   const [sessions, setSessions] = useState<Session[]>([]);
   const [sid, setSid] = useState<string | null>(null);
   const [messages, setMessages] = useState<ChatMsg[]>([]);
@@ -48,7 +54,7 @@ export default function App() {
   const [running, setRunning] = useState(false);
   const [approval, setApproval] = useState<PendingApproval | null>(null);
   const [error, setError] = useState("");
-  const [mode, setMode] = useState("workspace");
+  const [permission, setPermission] = useState("human");
   const [sidebarOpen, setSidebarOpen] = useState(true);
   const [settingsOpen, setSettingsOpen] = useState(false);
   const [artifacts, setArtifacts] = useState<Artifact[]>([]);
@@ -56,6 +62,8 @@ export default function App() {
   const streamRef = useRef("");
   const stepIdRef = useRef(0);
   const runStartedRef = useRef<number | null>(null);
+  const currentSession = sessions.find((session) => session.id === sid) || null;
+  const currentArchived = currentSession?.archived === true;
 
   function addStep(
     kind: string,
@@ -109,7 +117,9 @@ export default function App() {
     api
       .settings()
       .then((s) => {
-        if (s.permission && MODE_LABELS[s.permission]) setMode(s.permission);
+        if (s.permission && PERMISSION_LABELS[s.permission]) {
+          setPermission(s.permission);
+        }
         setSidebarOpen(s.sidebar_open !== false);
       })
       .catch(() => {});
@@ -130,6 +140,7 @@ export default function App() {
   async function selectSession(s: Session) {
     if (running) return;
     setSid(s.id);
+    if (PERMISSION_LABELS[s.permission]) setPermission(s.permission);
     setSteps([]);
     setArtifacts([]);
     setDurationMs(null);
@@ -266,6 +277,25 @@ export default function App() {
       case "approval_request":
         if (ev.id) setApproval({ id: ev.id, tool: ev.tool || "", detail: ev.detail || "" });
         break;
+      case "policy_decision": {
+        const label =
+          ev.decision === "allow"
+            ? "通过"
+            : ev.decision === "deny"
+              ? "拒绝"
+              : "升级人工";
+        addStep(
+          "权限审核",
+          `${ev.tool || "工具"} · ${label}`,
+          ev.decision === "deny"
+            ? "error"
+            : ev.decision === "allow"
+              ? "success"
+              : "info",
+          ev.reason
+        );
+        break;
+      }
       case "error":
         setError(ev.message || "运行出错");
         addStep("错误", ev.message || "运行出错", "error");
@@ -278,7 +308,7 @@ export default function App() {
 
   function send(text: string) {
     const task = text.trim();
-    if (!task || running) return;
+    if (!task || running || currentArchived) return;
     setError("");
     setSteps([]);
     setArtifacts([]);
@@ -290,7 +320,7 @@ export default function App() {
     setMessages((m) => [...m, { role: "user", content: task }]);
     setRunning(true);
     api
-      .startTask({ task, mode, session_id: sid })
+      .startTask({ task, permission, session_id: sid })
       .then((r) => {
         if (!r.ok || !r.task_id) {
           setError(r.message || "任务启动失败");
@@ -326,6 +356,13 @@ export default function App() {
     setApproval(null);
   }
 
+  function setArchived(id: string, archived: boolean) {
+    api
+      .archiveSession(id, archived)
+      .then(refreshSessions)
+      .catch(() => {});
+  }
+
   return (
     <div className="app">
       <Sidebar
@@ -335,9 +372,10 @@ export default function App() {
         disabled={running}
         onSelect={selectSession}
         onNew={newChat}
-        onDelete={(id) => api.deleteSession(id).then(refreshSessions).catch(() => {})}
+        onSetArchived={setArchived}
         onCollapse={() => toggleSidebar(false)}
         onSettings={() => setSettingsOpen(true)}
+        archivePrototype={archivePrototypeVariant}
       />
       <main className="main">
         {!sidebarOpen && (
@@ -354,16 +392,21 @@ export default function App() {
           durationMs={durationMs}
           approval={approval}
           error={error}
-          mode={mode}
-          onMode={(m) => {
-            setMode(m);
-            api.patchSettings({ permission: m } as never).catch(() => {});
+          permission={permission}
+          onPermission={(next) => {
+            setPermission(next);
+            api.patchSettings({ permission: next } as never).catch(() => {});
           }}
+          archived={currentArchived}
+          onRestore={() => sid && setArchived(sid, false)}
           onSend={send}
           onResolveApproval={resolveApproval}
         />
       </main>
       {settingsOpen && <SettingsModal onClose={() => setSettingsOpen(false)} />}
+      {archivePrototypeVariant && (
+        <ArchivePrototypeSwitcher current={archivePrototypeVariant} />
+      )}
     </div>
   );
 }

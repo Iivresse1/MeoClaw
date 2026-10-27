@@ -314,6 +314,11 @@ def test_actor_node_binds_todo_update_tool(state: dict[str, Any]) -> None:
         "BashTool",
         "WebSearchTool",
         "WebFetchTool",
+        "TakeScreenshot",
+        "ClipboardRead",
+        "ClipboardWrite",
+        "OpenUrl",
+        "OpenWorkspaceFile",
         "TodoUpdateTool",
     ]
 
