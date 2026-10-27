@@ -2,7 +2,7 @@
 
 MeoClaw 是一个本地桌面的 AI 助理：支持纯对话、工作区文件任务和系统工具（截图/剪贴板/打开链接）三类模式。所有可执行工具的 Agent 模式都支持 Tavily 网络搜索与网页正文读取；1.1 分支使用 LangChain `create_agent` 与 middleware 管理 ReAct 循环、工具错误、调用预算、上下文摘要和人工审批，并通过 SQLite checkpoint 持久化会话。
 
-~想看如何构建它的？可以打开docs下的BACKEND_GUIDE进行阅读。
+~想看如何构建后端的？可以打开docs下的BACKEND_GUIDE进行阅读。
 
 ## 项目整体架构
 
