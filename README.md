@@ -292,5 +292,3 @@ npm install
 
 > 仓库分支说明：**`main`** 为完整项目（后端核心 `src/` + 桥接层 `bridge/` + 桌面端 `desktop/`）；
 > **`branch`** 为后端核心 `meoclaw` 的备份分支。
-
-本项目前端参考 dsh 与 openclaw 重新设计，并由 AI 辅助实现。
